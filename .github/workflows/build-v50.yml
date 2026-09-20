@@ -1,4 +1,4 @@
-name: Build Bambini v5.1 HLS AV preload
+name: Build Bambini v5.2 HLS deep buffer
 on:
   push:
     paths:
@@ -22,15 +22,15 @@ jobs:
           wget -q https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
           unzip -q gradle-8.14.3-bin.zip
           ./gradle-8.14.3/bin/gradle :app:assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v5.1-HLS-AV-preload.apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v5.2-HLS-deep-buffer.apk
       - name: Publish APK
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add Bambini-Living-v5.1-HLS-AV-preload.apk
-          git commit -m "Publish Bambini Living v5.1 HLS AV preload APK" || exit 0
+          git add Bambini-Living-v5.2-HLS-deep-buffer.apk
+          git commit -m "Publish Bambini Living v5.2 HLS deep buffer APK" || exit 0
           git push
       - uses: actions/upload-artifact@v4
         with:
-          name: Bambini-Living-v5.1-HLS-AV-preload
-          path: Bambini-Living-v5.1-HLS-AV-preload.apk
+          name: Bambini-Living-v5.2-HLS-deep-buffer
+          path: Bambini-Living-v5.2-HLS-deep-buffer.apk
