@@ -1,4 +1,4 @@
-name: Build Bambini v6 production candidate
+name: Build Bambini v6.1 production hardened
 on:
   push:
     paths:
@@ -27,15 +27,15 @@ jobs:
           wget -q https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
           unzip -q gradle-8.14.3-bin.zip
           ./gradle-8.14.3/bin/gradle :app:assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v6-production-candidate.apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v6.1-production-hardened.apk
       - name: Publish APK
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add Bambini-Living-v6-production-candidate.apk
-          git commit -m "Publish Bambini Living v6 production candidate APK" || exit 0
+          git add Bambini-Living-v6.1-production-hardened.apk
+          git commit -m "Publish Bambini Living v6.1 production hardened APK" || exit 0
           git push
       - uses: actions/upload-artifact@v4
         with:
-          name: Bambini-Living-v6-production-candidate
-          path: Bambini-Living-v6-production-candidate.apk
+          name: Bambini-Living-v6.1-production-hardened
+          path: Bambini-Living-v6.1-production-hardened.apk
