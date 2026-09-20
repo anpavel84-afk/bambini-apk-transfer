@@ -44,7 +44,7 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String TAG = "BambiniQA";
-    private static final String BUILD = "6.4-buffered-slide";
+    private static final String BUILD = "6.5-cinematic-prefetch";
     private static final String BASE = "https://bambini.anpavel.ru";
     private static final String APP_KEY = "_SEs08BNhi4G1ZRKuYI_" + "mimSSeEtOL8WiG1g0qe_" + "5qgoLJVxTEb7Z2_geKZl-Vxn";
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
@@ -54,7 +54,7 @@ public class MainActivity extends Activity {
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService control = Executors.newSingleThreadExecutor();
-    private final ExecutorService prefetch = Executors.newSingleThreadExecutor();
+    private final ExecutorService prefetch = Executors.newFixedThreadPool(3);
 
     private WebView web;
     private File warmRoot;
@@ -114,8 +114,14 @@ public class MainActivity extends Activity {
                 api.enroll();
                 logEvent("CONTROL_ENROLLED", "ok");
                 cleanupTransient();
-                List<String> ids = loadOrChooseWarmIds();
-                fillWarmPool(ids);
+                List<String> ready = readyWarmIds();
+                if (ready.isEmpty()) {
+                    setWarmProgress("NO_WARM", "", 0, 1, "");
+                    logEvent("WARM_BOOTSTRAP", "no local warm media; start queue immediately and promote played videos");
+                } else {
+                    setWarmProgress("POOL_ACTIVE", ready.get(0), ready.size(), WARM_TARGET, "");
+                    logEvent("WARM_BOOTSTRAP", "local_ready=" + ready.size());
+                }
             } catch (Exception e) {
                 logEvent("CONTROL_ERROR", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
                 setWarmProgress("ERROR", "", 0, 1, e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
@@ -545,7 +551,7 @@ public class MainActivity extends Activity {
             throw new Exception("hls prepare timeout");
         }
 
-        synchronized byte[] getBytes(String path) throws Exception {
+        byte[] getBytes(String path) throws Exception {
             if (path == null || !path.startsWith("/")) throw new Exception("unsafe path");
             if (cookie == null) enroll();
             HttpURLConnection c = open(BASE + path, "GET");
@@ -602,7 +608,7 @@ public class MainActivity extends Activity {
         c.setReadTimeout(45000);
         c.setRequestMethod(method);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "BambiniLiving/6.4");
+        c.setRequestProperty("User-Agent", "BambiniLiving/6.5");
         return c;
     }
 

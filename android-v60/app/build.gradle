@@ -1,4 +1,4 @@
 plugins { id 'com.android.application' }
 android { namespace 'ru.anpavel.bambiniliving'; compileSdk 35
- defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 19; versionName '6.4-buffered-slide' }
+ defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 20; versionName '6.5-cinematic-prefetch' }
 }

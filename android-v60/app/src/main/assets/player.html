@@ -4,25 +4,26 @@
 :root{font-family:system-ui,sans-serif;background:#10110f;color:#f2eee6}
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#10110f}body{cursor:none}
 #frame,.scene,#splash{position:fixed;inset:0}
-.scene{display:flex;gap:18px;padding:0;background:#fff;opacity:0;transform:translateX(100%);transition:transform .58s cubic-bezier(.22,.8,.25,1),opacity .38s ease;overflow:hidden;will-change:transform,opacity}
-.scene.visible{opacity:1;transform:translateX(0)}
-.scene.leaving{opacity:1;transform:translateX(-100%)}
-.panel{position:relative;flex:1;min-width:0;overflow:hidden;background:#10110f;transition:filter .8s ease,opacity .8s ease}
+.scene{display:flex;gap:18px;padding:0;background:#fff;opacity:0;transform:scale(1.025);transition:opacity 1.25s cubic-bezier(.22,.61,.36,1),transform 1.45s cubic-bezier(.22,.61,.36,1);overflow:hidden;will-change:opacity,transform}
+.scene.visible{opacity:1;transform:scale(1)}
+.scene.leaving{opacity:0;transform:scale(.992)}
+.panel{position:relative;flex:1;min-width:0;overflow:hidden;background:#10110f;transition:filter 1.1s ease,opacity 1.1s ease}
 .panel.subdued{filter:brightness(.55) saturate(.7)}
 .visual{position:absolute;width:100%;height:100%;inset:0;object-fit:cover}
-.photo{object-position:center center;animation:memory-drift 24s ease-in-out forwards;z-index:1}
-.poster{z-index:3;opacity:1;transition:opacity .28s ease}
-video.visual{z-index:2;object-fit:cover;background:#10110f;opacity:0;visibility:hidden;transition:opacity .28s ease}
+.photo{object-position:center center;animation:memory-drift 8s ease-out forwards;z-index:1}
+.poster{z-index:3;opacity:1;transition:opacity .65s ease}
+video.visual{z-index:2;object-fit:cover;background:#10110f;opacity:0;visibility:hidden;transition:opacity .65s ease}
 video.visual.playing{visibility:visible;opacity:1}
 video::-webkit-media-controls,video::-webkit-media-controls-start-playback-button{display:none!important;-webkit-appearance:none}
-.cinematic{justify-content:center}.cinematic .panel{max-width:58%;background:transparent}
-.backdrop{position:absolute;inset:-6%;width:112%;height:112%;object-fit:cover;filter:blur(35px) brightness(.3);transform:scale(1.06);z-index:0}
+.cinematic{justify-content:center}.cinematic .panel{max-width:none;width:100%;background:#10110f}
+.cinematic .visual{object-fit:cover}
+.backdrop{display:none}
 .meta{position:absolute;left:34px;bottom:28px;font-size:clamp(14px,1.5vw,22px);font-weight:350;letter-spacing:.04em;text-shadow:0 2px 12px #000;background:linear-gradient(90deg,#0006,transparent);padding:10px 15px;z-index:4}
 #splash{z-index:20;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 40% 35%,#29342d,#10110f 65%);transition:opacity .55s}
 .splash-inner{width:260px;text-align:center}.brand{font-size:14px;letter-spacing:.42em;color:#c1b397;display:block;margin-bottom:18px}
 .track{height:3px;background:#ffffff18;border-radius:4px;overflow:hidden}.fill{height:100%;width:0;background:#c1b397;transition:width .18s linear}
 #frame{z-index:1}
-@keyframes memory-drift{from{transform:scale(1)}to{transform:scale(1.025)}}
+@keyframes memory-drift{from{transform:scale(1)}to{transform:scale(1.035)}}
 </style></head><body>
 <main id="frame"></main>
 <div id="splash"><div class="splash-inner"><span class="brand">BAMBINI</span><div class="track"><div class="fill" id="fill"></div></div></div></div>
@@ -282,11 +283,11 @@ async function playScene(scene,built,onFirstPlaying){
 
 async function transitionTo(node,old,meta={}){
  frame.append(node);
- await sleep(20);
+ await sleep(34);
  node.classList.add('visible');
  if(old)old.classList.add('leaving');
- diag('TRANSITION_SLIDE',{from:old?.dataset?.kind||null,to:node.dataset.kind,...meta});
- await sleep(620);
+ diag('TRANSITION_DISSOLVE',{from:old?.dataset?.kind||null,to:node.dataset.kind,...meta});
+ await sleep(1350);
  if(old)disposeNode(old);
  current=node;
 }
@@ -376,7 +377,13 @@ function startup(){
   refill();
   return;
  }
- setTimeout(startup,180);
+ if(queue.length){
+  diag('START_WITH_QUEUE',{scenes:queue.length});
+  starterDone=true;
+  advance();
+  return;
+ }
+ setTimeout(startup,120);
 }
 
 refill();
