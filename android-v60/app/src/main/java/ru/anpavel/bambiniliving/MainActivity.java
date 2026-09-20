@@ -31,6 +31,8 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -60,6 +62,7 @@ public class MainActivity extends Activity {
     private volatile int warmFileDone = 0;
     private volatile int warmFileTotal = 1;
     private volatile String warmError = "";
+    private final Set<String> failedVideos = Collections.synchronizedSet(new HashSet<>());
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -142,15 +145,25 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface public void prefetchVideo(String id) {
             if (id == null || !id.matches("\\d+")) return;
-            if (isWarmReady(id) || isTransientReady(id)) return;
+            if (isWarmReady(id) || isTransientReady(id) || failedVideos.contains(id)) return;
             prefetch.execute(() -> {
-                try { downloadHlsTo(transientRoot, id, false); }
-                catch (Exception ignored) {}
+                try {
+                    downloadHlsTo(transientRoot, id, false);
+                    failedVideos.remove(id);
+                } catch (Exception e) {
+                    failedVideos.add(id);
+                }
             });
         }
 
         @JavascriptInterface public boolean isVideoReady(String id) {
             return isWarmReady(id) || isTransientReady(id);
+        }
+
+        @JavascriptInterface public String videoState(String id) {
+            if (isWarmReady(id) || isTransientReady(id)) return "READY";
+            if (failedVideos.contains(id)) return "FAILED";
+            return "LOADING";
         }
     }
 
@@ -267,6 +280,7 @@ public class MainActivity extends Activity {
         deleteTree(dest);
         if (!tmp.renameTo(dest)) throw new Exception("rename failed");
         if (root == transientRoot) touchTree(dest);
+        failedVideos.remove(id);
     }
 
     private boolean isWarmReady(String id) {
