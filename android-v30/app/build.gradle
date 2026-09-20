@@ -8,8 +8,8 @@ android {
         applicationId 'ru.anpavel.bambiniliving'
         minSdk 23
         targetSdk 35
-        versionCode 5
-        versionName '3.0-native'
+        versionCode 6
+        versionName '3.1-native'
     }
 }
 
