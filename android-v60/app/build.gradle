@@ -1,4 +1,4 @@
 plugins { id 'com.android.application' }
 android { namespace 'ru.anpavel.bambiniliving'; compileSdk 35
- defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 18; versionName '6.3-playback-gated' }
+ defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 19; versionName '6.4-buffered-slide' }
 }

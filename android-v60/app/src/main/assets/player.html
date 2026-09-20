@@ -4,8 +4,9 @@
 :root{font-family:system-ui,sans-serif;background:#10110f;color:#f2eee6}
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#10110f}body{cursor:none}
 #frame,.scene,#splash{position:fixed;inset:0}
-.scene{display:flex;gap:18px;padding:0;background:#fff;opacity:0;transition:opacity .8s ease;overflow:hidden}
-.scene.visible{opacity:1}
+.scene{display:flex;gap:18px;padding:0;background:#fff;opacity:0;transform:translateX(100%);transition:transform .58s cubic-bezier(.22,.8,.25,1),opacity .38s ease;overflow:hidden;will-change:transform,opacity}
+.scene.visible{opacity:1;transform:translateX(0)}
+.scene.leaving{opacity:1;transform:translateX(-100%)}
 .panel{position:relative;flex:1;min-width:0;overflow:hidden;background:#10110f;transition:filter .8s ease,opacity .8s ease}
 .panel.subdued{filter:brightness(.55) saturate(.7)}
 .visual{position:absolute;width:100%;height:100%;inset:0;object-fit:cover}
@@ -33,7 +34,8 @@ window.addEventListener('error',e=>diag('WINDOW_ERROR',{message:e.message,source
 window.addEventListener('unhandledrejection',e=>diag('UNHANDLED_REJECTION',String(e.reason)));
 diag('SCRIPT_START',{href:location.href,ua:navigator.userAgent});
 function hideSplash(){if(splash.dataset.hidden)return;splash.dataset.hidden='1';diag('SPLASH_HIDE');splash.style.opacity='0';setTimeout(()=>splash.style.display='none',600)}
-const PREFETCH_AHEAD=6;
+const PREFETCH_AHEAD=5;
+const PHOTO_SECONDS=8;
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function warmStatus(){try{return JSON.parse(App.warmStatus()||'{}')}catch(_){return {}}}
@@ -65,18 +67,15 @@ function videoStates(scene){
  return videoIds(scene).map(id=>({id,state:(()=>{try{return App.videoState(id)}catch(_){return 'LOADING'}})()}));
 }
 
-function pickReadySceneIndex(){
- const limit=Math.min(queue.length,10);
- for(let i=0;i<limit;i++){
-  const s=queue[i], states=videoStates(s);
-  if(!states.length)return i;
-  if(states.some(x=>x.state==='FAILED')){
-   diag('SCENE_DROP_FAILED',{kind:s.kind,ids:states.map(x=>x.id)});
-   queue.splice(i,1); i--; continue;
-  }
-  if(states.every(x=>x.state==='READY'))return i;
+function pickNextSceneIndex(){
+ if(!queue.length)return -1;
+ const s=queue[0],states=videoStates(s);
+ if(states.some(x=>x.state==='FAILED')){
+  diag('SCENE_DROP_FAILED',{kind:s.kind,ids:states.map(x=>x.id)});
+  queue.shift();
+  return pickNextSceneIndex();
  }
- return -1;
+ return 0;
 }
 
 function disposeNode(node){
@@ -175,9 +174,8 @@ function fallbackPoster(panelData,ms=4500){
 
 async function playHls(item,panelData,onReveal){
  diag('VIDEO_WAIT',{id:item.id});
- const ok=await waitReady(item.id,2500);
- if(!ok){diag('VIDEO_NOT_READY_AT_PLAY',{id:item.id});return false}
-
+ const initialReady=(()=>{try{return App.videoState(String(item.id))==='READY'}catch(_){return false}})();
+ if(!initialReady)diag('VIDEO_POSTER_BUFFERING',{id:item.id});
  return new Promise(resolve=>{
   const panel=panelData.panel,poster=panelData.poster;
   let leased=false;
@@ -229,6 +227,7 @@ async function playHls(item,panelData,onReveal){
    }));
   };
 
+  const startSource=()=>{
   const source=hlsPath(item.id);
   if(Hls.isSupported()){
    hls=new Hls({maxBufferLength:45,maxMaxBufferLength:75,backBufferLength:5,enableWorker:true,startFragPrefetch:true,fragLoadingTimeOut:30000});
@@ -249,15 +248,23 @@ async function playHls(item,panelData,onReveal){
   v.addEventListener('ended',()=>{diag('VIDEO_ENDED',{id:item.id,time:v.currentTime});finish(true)});
   v.addEventListener('error',()=>{diag('VIDEO_ELEMENT_ERROR',{id:item.id,code:v.error?.code,message:v.error?.message});finish(started)});
 
-  startTimer=setTimeout(()=>{if(!started){diag('VIDEO_START_TIMEOUT',{id:item.id});finish(false)}},6000);
-  hardTimer=setTimeout(()=>{diag('VIDEO_HARD_TIMEOUT',{id:item.id,time:v.currentTime,started});finish(started)},((Math.max(8,item.limit||80))+25)*1000);
+  startTimer=setTimeout(()=>{if(!started){diag('VIDEO_START_TIMEOUT',{id:item.id});finish(false)}},12000);
+  hardTimer=setTimeout(()=>{diag('VIDEO_HARD_TIMEOUT',{id:item.id,time:v.currentTime,started});finish(started)},((Math.max(8,item.limit||80))+35)*1000);
+  };
+  if(initialReady)startSource();
+  else waitReady(item.id,12000).then(ok=>{
+   if(finished)return;
+   if(ok)startSource();
+   else{diag('VIDEO_BUFFER_TIMEOUT',{id:item.id});finish(false)}
+  });
  });
 }
 
 async function playScene(scene,built,onFirstPlaying){
  const vids=scene.items.map((x,i)=>x.type==='video'?i:-1).filter(i=>i>=0);
  if(!vids.length){
-  await sleep(Math.max(2500,(scene.duration||8)*1000));
+  diag('PHOTO_HOLD',{kind:scene.kind,ms:PHOTO_SECONDS*1000});
+  await sleep(PHOTO_SECONDS*1000);
   return true;
  }
  let allStarted=true;
@@ -273,69 +280,48 @@ async function playScene(scene,built,onFirstPlaying){
  return allStarted;
 }
 
+async function transitionTo(node,old,meta={}){
+ frame.append(node);
+ await sleep(20);
+ node.classList.add('visible');
+ if(old)old.classList.add('leaving');
+ diag('TRANSITION_SLIDE',{from:old?.dataset?.kind||null,to:node.dataset.kind,...meta});
+ await sleep(620);
+ if(old)disposeNode(old);
+ current=node;
+}
+
 async function advance(){
  if(running||!starterDone)return;
  if(!queue.length){refill();return}
  running=true;
 
  while(true){
-  if(!queue.length){refill();await sleep(400);if(!queue.length)break}
+  if(!queue.length){refill();await sleep(300);if(!queue.length)break}
   prefetchScenes();
-  const idx=pickReadySceneIndex();
-  if(idx<0){
-   diag('BUFFER_WAIT',{queue:queue.length,states:queue.slice(0,6).map(s=>({kind:s.kind,states:videoStates(s)}))});
-   refill();
-   await sleep(350);
-   continue;
-  }
+  const idx=pickNextSceneIndex();
+  if(idx<0){refill();await sleep(250);continue}
 
   const scene=queue.splice(idx,1)[0];
-  diag('SCENE_BEGIN',{kind:scene.kind,ids:scene.items.map(x=>x.id),queueLeft:queue.length,reorderedBy:idx});
-  refill();
-  prefetchScenes();
+  const states=videoStates(scene);
+  diag('SCENE_BEGIN',{kind:scene.kind,ids:scene.items.map(x=>x.id),states,queueLeft:queue.length});
+  refill();prefetchScenes();
 
   let built;
   try{built=await build(scene)}catch(e){diag('SCENE_BUILD_ERROR',{kind:scene.kind,error:String(e)});continue}
-  const node=built.node,old=current;
-  const vids=videoIds(scene);
-  if(vids.length && built.panelData.some(x=>x.item.type==='video'&&!x.posterOk)){
-   diag('SCENE_SKIP_POSTER',{kind:scene.kind,ids:vids});
-   disposeNode(node);
-   continue;
-  }
-
-  frame.append(node);
+  const node=built.node,old=current,vids=videoIds(scene);
 
   if(vids.length){
-   let revealResolve;
-   const firstPlaying=new Promise(r=>revealResolve=r);
-   const playPromise=playScene(scene,built,()=>revealResolve(true));
-   const started=await Promise.race([firstPlaying,playPromise.then(()=>false),sleep(6500).then(()=>false)]);
-   if(!started){
-    diag('SCENE_SKIP_VIDEO_START',{kind:scene.kind,ids:vids});
-    await playPromise.catch(()=>false);
-    disposeNode(node);
-    continue;
-   }
-
-   current=node;
-   node.classList.add('visible');
-   if(old)old.classList.remove('visible');
-   diag('SCENE_VISIBLE',{kind:scene.kind,ids:scene.items.map(x=>x.id),video:true});
+   // User-requested behavior: transition immediately after previous scene,
+   // show poster while the local HLS prefetch finishes, then start video in-place.
+   await transitionTo(node,old,{video:true,readyAtTransition:states.every(x=>x.state==='READY')});
    hideSplash();
-   await sleep(850);
-   if(old)disposeNode(old);
    try{App.played(JSON.stringify(scene.items.map(x=>x.id)))}catch(_){}
-   const allStarted=await playPromise.catch(e=>{diag('SCENE_PLAY_ERROR',{kind:scene.kind,error:String(e)});return false});
-   if(!allStarted)diag('SCENE_PARTIAL_VIDEO_FAIL',{kind:scene.kind,ids:vids});
+   const allStarted=await playScene(scene,built);
+   if(!allStarted)diag('SCENE_VIDEO_FAIL',{kind:scene.kind,ids:vids});
   }else{
-   current=node;
-   node.classList.add('visible');
-   if(old)old.classList.remove('visible');
-   diag('SCENE_VISIBLE',{kind:scene.kind,ids:scene.items.map(x=>x.id),video:false});
+   await transitionTo(node,old,{video:false});
    hideSplash();
-   await sleep(850);
-   if(old)disposeNode(old);
    try{App.played(JSON.stringify(scene.items.map(x=>x.id)))}catch(_){}
    await playScene(scene,built);
   }
