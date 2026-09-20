@@ -1,0 +1,78 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#000"><title>Bambini Debug</title>
+<style>
+html,body,#stage{margin:0;width:100%;height:100%;overflow:hidden;background:#10110f;color:#eee;font-family:system-ui,sans-serif}
+video.layer{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000;opacity:0;transition:opacity .35s ease;pointer-events:none}
+video::-webkit-media-controls,video::-webkit-media-controls-start-playback-button{display:none!important;-webkit-appearance:none}
+#cover{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#10110f;z-index:5;opacity:1;transition:opacity .3s ease;pointer-events:none}
+#splash{position:fixed;inset:0;z-index:6;display:flex;flex-direction:column;align-items:center;justify-content:center;background:radial-gradient(ellipse at 40% 35%,#29342d,#10110f 65%);transition:opacity .35s}
+.brand{font-size:14px;letter-spacing:.42em;color:#c1b397;margin-bottom:30px}
+.loader{width:min(72vw,620px);max-width:620px}
+.title{font-size:20px;margin-bottom:14px;text-align:center}
+.track{height:8px;border-radius:8px;background:#ffffff18;overflow:hidden}
+.fill{height:100%;width:0;background:#d3c5a8;transition:width .15s linear}
+.row{display:flex;justify-content:space-between;gap:20px;color:#c7c8c2;font-size:13px;margin-top:10px}
+#detail{margin-top:8px;color:#8f938c;font:11px ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#error{margin-top:12px;color:#ff9b8d;font:12px ui-monospace,monospace;max-width:min(82vw,760px);text-align:center}
+#debug{position:fixed;left:8px;bottom:8px;z-index:9;background:#000b;color:#d8d8d0;padding:6px 8px;border-radius:4px;font:10px ui-monospace,monospace;max-width:70vw;white-space:pre-wrap}
+</style></head><body><div id="stage">
+<video id="v0" class="layer" preload="auto" playsinline></video><video id="v1" class="layer" preload="auto" playsinline></video>
+<img id="cover" alt="">
+<div id="splash"><div class="brand">BAMBINI</div><div class="loader">
+<div class="title" id="title">Подготавливаем локальный старт…</div>
+<div class="track"><div class="fill" id="fill"></div></div>
+<div class="row"><span id="mb">0.0 / 0.0 МБ</span><span id="pct">0%</span></div>
+<div id="detail">инициализация</div><div id="error"></div>
+</div></div>
+<div id="debug">BOOT</div></div>
+<script src="/assets/hls.min.js"></script><script>
+const slots=[0,1].map(i=>({v:document.getElementById('v'+i),h:null,id:null}));
+const cover=document.getElementById('cover'),splash=document.getElementById('splash');
+const fill=document.getElementById('fill'),pct=document.getElementById('pct'),mb=document.getElementById('mb');
+const detail=document.getElementById('detail'),err=document.getElementById('error'),debug=document.getElementById('debug');
+let current=-1,seq=0,busy=false,ready=[],booted=false;
+
+function fmt(n){return (Number(n||0)/1048576).toFixed(1)}
+function renderStatus(raw){
+ let s;try{s=typeof raw==='string'?JSON.parse(raw):raw}catch(_){return}
+ const p=Number(s.percent||0);
+ fill.style.width=p+'%';pct.textContent=p+'%';
+ mb.textContent=fmt(s.done)+' / '+fmt(s.total)+' МБ';
+ detail.textContent=(s.stage||'')+' · video '+(s.id||'—')+' · '+(s.file||'—');
+ err.textContent=s.error||'';
+ debug.textContent='stage='+s.stage+'\nready='+(s.ready||[]).join(',')+'\nfile='+s.file+'\nerror='+(s.error||'—');
+ if((s.ready||[]).length) window.onWarmUpdate();
+}
+function poll(){try{renderStatus(Warm.status())}catch(e){debug.textContent='BRIDGE ERROR '+e}setTimeout(poll,500)}
+window.onWarmProgress=renderStatus;
+
+function refresh(){try{ready=JSON.parse(Warm.readyIds()||'[]')}catch(_){ready=[]}}
+window.onWarmUpdate=()=>{refresh();if(!booted&&ready.length)boot()};
+function destroy(s){if(s.h){try{s.h.destroy()}catch(_){}}s.h=null;s.v.pause();s.v.removeAttribute('src');s.v.load();s.v.style.opacity='0'}
+function source(id){return '/warm/'+id+'/index.m3u8'}
+function poster(id){return '/warm/'+id+'/poster.jpg'}
+function attach(i,id){
+ const s=slots[i];destroy(s);s.id=id;s.v.muted=false;s.v.volume=1;
+ s.h=new Hls({autoStartLoad:true,startPosition:0,maxBufferLength:30,maxMaxBufferLength:60,backBufferLength:5,enableWorker:true,startFragPrefetch:true});
+ s.h.loadSource(source(id));s.h.attachMedia(s.v);
+ s.h.on(Hls.Events.ERROR,(_,d)=>{if(d.fatal)debug.textContent+='\nHLS FATAL '+id+' '+d.details});
+}
+function choose(exclude){
+ refresh();const a=ready.filter(x=>x!==exclude);if(!a.length)return exclude||ready[0]||null;
+ return a[seq++%a.length];
+}
+function playSlot(i,initial){
+ if(busy)return;const s=slots[i];if(!s.id)return;busy=true;
+ if(initial){cover.src=poster(s.id)}
+ const on=()=>{s.v.removeEventListener('playing',on);s.v.style.opacity='1';cover.style.opacity='0';splash.style.opacity='0';setTimeout(()=>splash.style.display='none',400);
+   const old=current>=0?slots[current]:null;if(old&&old!==s)old.v.style.opacity='0';
+   setTimeout(()=>{if(old&&old!==s){old.v.pause();const n=choose(s.id);if(n)attach(current,n)}current=i;busy=false},380)};
+ s.v.addEventListener('playing',on);s.v.play().catch(e=>{debug.textContent+='\nPLAY '+e.message;s.v.muted=true;s.v.play().then(()=>s.v.muted=false).catch(()=>{})});
+}
+function boot(){
+ if(booted)return;refresh();if(!ready.length)return;
+ booted=true;const first=choose(null);attach(0,first);const second=choose(first);if(second)attach(1,second);playSlot(0,true);
+}
+slots.forEach((s,i)=>s.v.addEventListener('ended',()=>{if(i!==current)return;const j=1-i;if(slots[j].id)playSlot(j,false);else{s.v.currentTime=0;s.v.play()}}));
+poll();refresh();if(ready.length)boot();
+</script></body></html>

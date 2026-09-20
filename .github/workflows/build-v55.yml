@@ -1,0 +1,41 @@
+name: Build Bambini v5.5 cache debug
+on:
+  push:
+    paths:
+      - 'android-v55/**'
+      - '.github/workflows/build-v55.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Bundle HLS runtime
+        run: |
+          mkdir -p android-v55/app/src/main/assets
+          curl -fsSL https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js -o android-v55/app/src/main/assets/hls.min.js
+          test -s android-v55/app/src/main/assets/hls.min.js
+      - name: Build
+        working-directory: android-v55
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+          unzip -q gradle-8.14.3-bin.zip
+          ./gradle-8.14.3/bin/gradle :app:assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v5.5-cache-debug.apk
+      - name: Publish APK
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add Bambini-Living-v5.5-cache-debug.apk
+          git commit -m "Publish Bambini Living v5.5 cache-debug APK" || exit 0
+          git push
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bambini-Living-v5.5-cache-debug
+          path: Bambini-Living-v5.5-cache-debug.apk
