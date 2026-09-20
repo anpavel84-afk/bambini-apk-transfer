@@ -28,13 +28,18 @@ video::-webkit-media-controls,video::-webkit-media-controls-start-playback-butto
 <script src="/assets/hls.min.js"></script><script>
 const frame=document.getElementById('frame'),splash=document.getElementById('splash'),fill=document.getElementById('fill');
 let queue=[],running=false,current=null,starterDone=false,refilling=false,starterId=null;
-function hideSplash(){if(splash.dataset.hidden)return;splash.dataset.hidden='1';splash.style.opacity='0';setTimeout(()=>splash.style.display='none',600)}
+function diag(event,detail=''){try{console.info('[Bambini]',event,detail);App.diag(String(event),typeof detail==='string'?detail:JSON.stringify(detail))}catch(_){}}
+window.addEventListener('error',e=>diag('WINDOW_ERROR',{message:e.message,source:e.filename,line:e.lineno,col:e.colno}));
+window.addEventListener('unhandledrejection',e=>diag('UNHANDLED_REJECTION',String(e.reason)));
+diag('SCRIPT_START',{href:location.href,ua:navigator.userAgent});
+function hideSplash(){if(splash.dataset.hidden)return;splash.dataset.hidden='1';diag('SPLASH_HIDE');splash.style.opacity='0';setTimeout(()=>splash.style.display='none',600)}
 const preloadSet=new Set();
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function warmStatus(){try{return JSON.parse(App.warmStatus()||'{}')}catch(_){return {}}}
 function warmIds(){try{return JSON.parse(App.warmIds()||'[]')}catch(_){return []}}
 function mediaPath(p,id){
+ try{if(App.isWarm(String(id)))return '/warm/'+id+'/poster.jpg'}catch(_){}
  const m=(p||'').match(/^\/(poster|thumb)\/(\d+)$/);
  if(m)return '/media/'+m[1]+'/'+m[2];
  return '/media/poster/'+id;
@@ -49,7 +54,7 @@ function prefetchScenes(){
  for(const s of queue){
   for(const id of videoIds(s)){
    if(n>=3)return;
-   if(!preloadSet.has(id)){preloadSet.add(id);try{App.prefetchVideo(id)}catch(_){}}
+   if(!preloadSet.has(id)){preloadSet.add(id);diag('PREFETCH_REQUEST',{id});try{App.prefetchVideo(id)}catch(e){diag('PREFETCH_BRIDGE_ERROR',{id,error:String(e)})}}
    n++;
   }
  }
@@ -61,7 +66,8 @@ function refill(){
  setTimeout(()=>{
   try{
    const obj=JSON.parse(App.queue()||'{}');
-   if(obj.scenes&&obj.scenes.length)queue.push(...obj.scenes);
+   if(obj.scenes&&obj.scenes.length){queue.push(...obj.scenes);diag('QUEUE_APPEND',{added:obj.scenes.length,total:queue.length,kinds:obj.scenes.map(x=>x.kind)})}
+   else diag('QUEUE_EMPTY',obj);
   }catch(_){}
   refilling=false;
   prefetchScenes();
@@ -76,10 +82,10 @@ function loadImageWithFallback(item,forVideo){
   img.alt='';
   let triedThumb=false,finished=false;
   const done=ok=>{if(finished)return;finished=true;resolve({img,ok})};
-  img.onload=()=>done(true);
+  img.onload=()=>{diag('IMAGE_OK',{id:item.id,src:img.src,natural:[img.naturalWidth,img.naturalHeight]});done(true)};
   img.onerror=()=>{
    if(!triedThumb){triedThumb=true;img.src=thumbPath(item.id);return}
-   done(false);
+   diag('IMAGE_FAIL',{id:item.id,src:img.src});done(false);
   };
   img.src=mediaPath(item.poster,item.id);
   setTimeout(()=>done(false),7000);
@@ -87,6 +93,7 @@ function loadImageWithFallback(item,forVideo){
 }
 
 async function build(scene){
+ diag('SCENE_BUILD',{kind:scene.kind,ids:scene.items.map(x=>x.id),types:scene.items.map(x=>x.type)});
  const node=document.createElement('section');
  node.className='scene';
  node.dataset.kind=scene.kind;
@@ -127,10 +134,10 @@ function waitReady(id,maxMs=18000){
   const check=()=>{
    try{
     const state=App.videoState(String(id));
-    if(state==='READY')return resolve(true);
-    if(state==='FAILED')return resolve(false);
+    if(state==='READY'){diag('VIDEO_READY',{id});return resolve(true)}
+    if(state==='FAILED'){diag('VIDEO_FAILED',{id});return resolve(false)}
    }catch(_){}
-   if(Date.now()-start>=maxMs)return resolve(false);
+   if(Date.now()-start>=maxMs){diag('VIDEO_READY_TIMEOUT',{id,maxMs});return resolve(false)}
    setTimeout(check,180);
   };
   check();
@@ -142,8 +149,9 @@ function fallbackPoster(panelData,ms=4500){
 }
 
 async function playHls(item,panelData,onReveal){
+ diag('VIDEO_WAIT',{id:item.id});
  const ok=await waitReady(item.id,18000);
- if(!ok)return fallbackPoster(panelData,4500);
+ if(!ok){diag('VIDEO_POSTER_FALLBACK',{id:item.id});return fallbackPoster(panelData,4500)}
 
  return new Promise(resolve=>{
   const panel=panelData.panel,poster=panelData.poster;
@@ -173,6 +181,7 @@ async function playHls(item,panelData,onReveal){
   const reveal=()=>{
    if(started)return;
    started=true;
+   diag('VIDEO_PLAYING',{id:item.id,readyState:v.readyState,width:v.videoWidth,height:v.videoHeight});
    if(onReveal)try{onReveal()}catch(_){}
    v.classList.add('playing');
    requestAnimationFrame(()=>requestAnimationFrame(()=>{
@@ -186,19 +195,22 @@ async function playHls(item,panelData,onReveal){
    h=new Hls({maxBufferLength:45,maxMaxBufferLength:75,backBufferLength:5,enableWorker:true,startFragPrefetch:true,fragLoadingTimeOut:30000});
    h.loadSource(source);
    h.attachMedia(v);
-   h.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(()=>done(4000)));
-   h.on(Hls.Events.ERROR,(_,d)=>{if(d.fatal)done(4000)});
+   h.on(Hls.Events.MANIFEST_PARSED,(_,d)=>{diag('HLS_MANIFEST',{id:item.id,levels:d.levels?.length||0});v.play().catch(e=>{diag('VIDEO_PLAY_REJECT',{id:item.id,error:String(e)});done(4000)})});
+   h.on(Hls.Events.ERROR,(_,d)=>{diag('HLS_ERROR',{id:item.id,type:d.type,details:d.details,fatal:d.fatal,response:d.response?.code});if(d.fatal)done(4000)});
   }else{
    v.src=source;
-   v.play().catch(()=>done(4000));
+   v.play().catch(e=>{diag('VIDEO_NATIVE_PLAY_REJECT',{id:item.id,error:String(e)});done(4000)});
   }
 
-  v.addEventListener('loadeddata',()=>{});
+  v.addEventListener('loadeddata',()=>diag('VIDEO_LOADEDDATA',{id:item.id,readyState:v.readyState}));
+  v.addEventListener('canplay',()=>diag('VIDEO_CANPLAY',{id:item.id,readyState:v.readyState}));
   v.addEventListener('playing',reveal);
-  v.addEventListener('ended',()=>done(350));
-  v.addEventListener('error',()=>done(4000));
+  v.addEventListener('waiting',()=>diag('VIDEO_WAITING',{id:item.id,time:v.currentTime,readyState:v.readyState}));
+  v.addEventListener('stalled',()=>diag('VIDEO_STALLED',{id:item.id,time:v.currentTime,readyState:v.readyState}));
+  v.addEventListener('ended',()=>{diag('VIDEO_ENDED',{id:item.id});done(350)});
+  v.addEventListener('error',()=>{diag('VIDEO_ELEMENT_ERROR',{id:item.id,code:v.error?.code,message:v.error?.message});done(4000)});
 
-  startTimer=setTimeout(()=>{if(!started)done(4000)},15000);
+  startTimer=setTimeout(()=>{if(!started){diag('VIDEO_START_TIMEOUT',{id:item.id});done(4000)}},15000);
   hardTimer=setTimeout(()=>done(400),((Math.max(8,item.limit||80))+25)*1000);
  });
 }
@@ -225,6 +237,7 @@ async function advance(){
 
  while(queue.length){
   const scene=queue.shift();
+  diag('SCENE_BEGIN',{kind:scene.kind,ids:scene.items.map(x=>x.id),queueLeft:queue.length});
   refill();
   prefetchScenes();
 
@@ -241,7 +254,8 @@ async function advance(){
   if(old)old.remove();
 
   try{App.played(JSON.stringify(scene.items.map(x=>x.id)))}catch(_){}
-  try{await playScene(scene,built)}catch(_){await sleep(3000)}
+  try{await playScene(scene,built)}catch(e){diag('SCENE_PLAY_ERROR',{kind:scene.kind,error:String(e)});await sleep(3000)}
+  diag('SCENE_END',{kind:scene.kind,ids:scene.items.map(x=>x.id)});
  }
  running=false;
  refill();
@@ -249,8 +263,10 @@ async function advance(){
 
 async function playStarter(){
  const ids=warmIds();
+ diag('STARTER_IDS',{ids});
  if(!ids.length)return false;
  starterId=ids[Math.floor(Math.random()*ids.length)];
+ diag('STARTER_PICK',{id:starterId});
 
  const fake={id:Number(starterId),limit:80,poster:'/poster/'+starterId,type:'video',person:'',date:''};
  const built=await build({kind:'LANDSCAPE_VIDEO',items:[fake]});
@@ -268,9 +284,11 @@ async function playStarter(){
  return true;
 }
 
+let lastStartupSig='';
 function startup(){
  const s=warmStatus(),ids=warmIds();
  fill.style.width=(s.percent||0)+'%';
+ const sig=[s.stage,s.id,s.percent,ids.length,s.error].join('|');if(sig!==lastStartupSig){lastStartupSig=sig;diag('STARTUP_STATUS',{stage:s.stage,id:s.id,percent:s.percent,ready:ids.length,error:s.error})}
  if(ids.length){
   playStarter();
   refill();

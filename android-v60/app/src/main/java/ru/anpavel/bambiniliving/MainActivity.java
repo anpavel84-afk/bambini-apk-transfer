@@ -6,9 +6,12 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.ConsoleMessage;
+import android.webkit.WebResourceError;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -40,8 +43,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
+    private static final String TAG = "BambiniQA";
+    private static final String BUILD = "6.2-diagnostic-hardened";
     private static final String BASE = "https://bambini.anpavel.ru";
-    private static final String GATEWAY = "http://169.58.183.182:18080";
     private static final String APP_KEY = "_SEs08BNhi4G1ZRKuYI_" + "mimSSeEtOL8WiG1g0qe_" + "5qgoLJVxTEb7Z2_geKZl-Vxn";
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
     private static final int WARM_TARGET = 10;
@@ -73,6 +77,7 @@ public class MainActivity extends Activity {
         warmRoot.mkdirs();
         transientRoot.mkdirs();
         api = new Api();
+        logEvent("APP_CREATE", "build=" + BUILD + " warm=" + warmRoot + " transient=" + transientRoot);
 
         web = new WebView(this);
         web.setBackgroundColor(Color.rgb(16,17,15));
@@ -88,25 +93,39 @@ public class MainActivity extends Activity {
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
         web.addJavascriptInterface(new AppBridge(), "App");
-        web.setWebChromeClient(new WebChromeClient());
+        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true);
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onConsoleMessage(ConsoleMessage cm) {
+                logEvent("WEB_CONSOLE", cm.messageLevel() + " " + cm.sourceId() + ":" + cm.lineNumber() + " " + cm.message());
+                return true;
+            }
+        });
         web.setWebViewClient(new LocalClient());
         setContentView(web);
         immersive();
+        logEvent("WEB_LOAD", APP_ORIGIN + "/assets/player.html");
         web.loadUrl(APP_ORIGIN + "/assets/player.html");
 
         control.execute(() -> {
             try {
+                logEvent("CONTROL_START", "enroll");
                 api.enroll();
+                logEvent("CONTROL_ENROLLED", "ok");
                 cleanupTransient();
                 List<String> ids = loadOrChooseWarmIds();
                 fillWarmPool(ids);
             } catch (Exception e) {
+                logEvent("CONTROL_ERROR", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
                 setWarmProgress("ERROR", "", 0, 1, e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
             }
         });
     }
 
     private final class AppBridge {
+        @JavascriptInterface public void diag(String event, String detail) {
+            logEvent("JS_" + safeLog(event), safeLog(detail));
+        }
+
         @JavascriptInterface public String warmStatus() {
             JSONObject o = new JSONObject();
             try {
@@ -128,8 +147,13 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface public String queue() {
             try {
-                return api.queue().toString();
+                logEvent("QUEUE_REQUEST", "start");
+                JSONObject q = api.queue();
+                JSONArray scenes = q.optJSONArray("scenes");
+                logEvent("QUEUE_OK", "scenes=" + (scenes == null ? 0 : scenes.length()));
+                return q.toString();
             } catch (Exception e) {
+                logEvent("QUEUE_ERROR", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
                 return "{\"scenes\":[]}";
             }
         }
@@ -146,12 +170,15 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void prefetchVideo(String id) {
             if (id == null || !id.matches("\\d+")) return;
             if (isWarmReady(id) || isTransientReady(id) || failedVideos.contains(id)) return;
+            logEvent("PREFETCH_QUEUE", "id=" + id);
             prefetch.execute(() -> {
                 try {
                     downloadHlsTo(transientRoot, id, false);
                     failedVideos.remove(id);
+                    logEvent("PREFETCH_OK", "id=" + id);
                 } catch (Exception e) {
                     failedVideos.add(id);
+                    logEvent("PREFETCH_ERROR", "id=" + id + " " + e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
                 }
             });
         }
@@ -242,45 +269,46 @@ public class MainActivity extends Activity {
         warmFileDone = done;
         warmFileTotal = Math.max(1,total);
         warmError = error == null ? "" : error;
+        logEvent("WARM_" + safeLog(stage), "id=" + warmId + " " + done + "/" + warmFileTotal + (warmError.isEmpty() ? "" : " error=" + warmError));
     }
 
     private void downloadHlsTo(File root, String id, boolean withPoster) throws Exception {
         File dest = new File(root, id);
-        if (new File(dest, ".complete").isFile() && new File(dest, "index.m3u8").isFile()) return;
+        if (new File(dest, ".complete").isFile() && new File(dest, "index.m3u8").isFile()) {
+            logEvent("HLS_LOCAL_HIT", "id=" + id + " pool=" + (root == warmRoot ? "warm" : "transient"));
+            return;
+        }
 
         File tmp = new File(root, "." + id + ".tmp");
         deleteTree(tmp);
         tmp.mkdirs();
 
-        String playlist = fetchText(GATEWAY + "/hlsdyn/" + id + "/index.m3u8");
-        writeBytes(new File(tmp, "index.m3u8"), playlist.getBytes(StandardCharsets.UTF_8));
-
-        if (withPoster) {
-            try {
-                writeBytes(new File(tmp, "poster.jpg"), fetchBytes(GATEWAY + "/media/poster/" + id));
-            } catch (Exception ignored) {}
+        logEvent("HLS_PREPARE", "id=" + id);
+        JSONObject desc = api.waitHls(id);
+        String baseUrl = desc.getString("base_url");
+        JSONArray files = desc.getJSONArray("files");
+        int written = 0;
+        for (int n=0; n<files.length(); n++) {
+            JSONObject fdesc = files.getJSONObject(n);
+            String name = fdesc.getString("name");
+            if (!withPoster && "poster.jpg".equals(name)) continue;
+            if (!name.matches("(?:index\\.m3u8|poster\\.jpg|seg_\\d{5}\\.ts)")) throw new Exception("unsafe hls file " + name);
+            byte[] data = api.getBytes(baseUrl + name);
+            long expected = fdesc.optLong("bytes", -1);
+            String expectedSha = fdesc.optString("sha256", "");
+            if (expected >= 0 && data.length != expected) throw new Exception("size mismatch " + name);
+            if (!expectedSha.isEmpty() && !expectedSha.equals(sha256(data))) throw new Exception("sha mismatch " + name);
+            writeBytes(new File(tmp, name), data);
+            written++;
+            if (root == warmRoot) setWarmProgress("DOWNLOADING", id, written, Math.max(1, files.length()), "");
         }
-
-        List<String> segments = new ArrayList<>();
-        for (String raw : playlist.split("\\r?\\n")) {
-            String line = raw.trim();
-            if (line.isEmpty() || line.startsWith("#")) continue;
-            if (line.contains("/") || line.contains("..")) continue;
-            segments.add(line);
-        }
-
-        int i = 0;
-        for (String seg : segments) {
-            i++;
-            if (root == warmRoot) setWarmProgress("DOWNLOADING", id, i, Math.max(1,segments.size()), "");
-            writeBytes(new File(tmp, seg), fetchBytes(GATEWAY + "/hlsdyn/" + id + "/" + seg));
-        }
-
+        if (!new File(tmp, "index.m3u8").isFile()) throw new Exception("missing playlist");
         writeBytes(new File(tmp, ".complete"), Long.toString(System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8));
         deleteTree(dest);
         if (!tmp.renameTo(dest)) throw new Exception("rename failed");
         if (root == transientRoot) touchTree(dest);
         failedVideos.remove(id);
+        logEvent("HLS_LOCAL_READY", "id=" + id + " pool=" + (root == warmRoot ? "warm" : "transient") + " bytes=" + treeSize(dest));
     }
 
     private boolean isWarmReady(String id) {
@@ -301,6 +329,20 @@ public class MainActivity extends Activity {
     }
 
     private final class LocalClient extends WebViewClient {
+        @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+            logEvent("WEB_PAGE_STARTED", url);
+        }
+        @Override public void onPageFinished(WebView view, String url) {
+            logEvent("WEB_PAGE_FINISHED", url);
+        }
+        @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+            logEvent("WEB_ERROR", request.getUrl() + " code=" + error.getErrorCode() + " " + error.getDescription());
+            super.onReceivedError(view, request, error);
+        }
+        @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+            logEvent("WEB_HTTP_ERROR", request.getUrl() + " status=" + response.getStatusCode());
+            super.onReceivedHttpError(view, request, response);
+        }
         @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
             return intercept(request.getUrl());
         }
@@ -331,19 +373,20 @@ public class MainActivity extends Activity {
                 File root = isWarmReady(id) ? warmRoot : transientRoot;
                 File f = safeFile(root, rel);
                 if (f != null && f.isFile()) return response(f.getName(), new FileInputStream(f));
-                // Last-resort synchronous cache miss.
-                byte[] data = fetchBytes(GATEWAY + "/hlsdyn/" + id + "/" + p[1]);
-                f = safeFile(transientRoot, rel);
-                writeBytes(f, data);
-                return response(f.getName(), new FileInputStream(f));
+                logEvent("LOCAL_STREAM_MISS", "id=" + id + " file=" + p[1]);
+                return notFound();
             }
             if (path.startsWith("/media/")) {
-                byte[] data = fetchBytes(GATEWAY + path);
+                String upstream = path.replaceFirst("^/media", "");
+                byte[] data = api.getBytes(upstream);
+                logEvent("MEDIA_OK", upstream + " bytes=" + data.length);
                 return new WebResourceResponse(
                         path.contains("/poster/") || path.contains("/thumb/") ? "image/jpeg" : "application/octet-stream",
                         null, new ByteArrayInputStream(data));
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            logEvent("INTERCEPT_ERROR", path + " " + e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
+        }
         return notFound();
     }
 
@@ -404,10 +447,45 @@ public class MainActivity extends Activity {
             drain(c);
             c.disconnect();
             if ((code != 200 && code != 302 && code != 303) || cookie == null) throw new Exception("enroll " + code);
+            logEvent("API_ENROLL", "status=" + code + " cookie=" + (cookie != null));
         }
 
         JSONObject queue() throws Exception {
             return post("/living/api/queue", new JSONObject());
+        }
+
+        JSONObject waitHls(String id) throws Exception {
+            long deadline = System.currentTimeMillis() + 95000L;
+            while (System.currentTimeMillis() < deadline) {
+                JSONObject d = post("/living/api/hls/" + id, new JSONObject());
+                String state = d.optString("state", "");
+                logEvent("HLS_STATE", "id=" + id + " state=" + state + " code=" + d.optString("code", ""));
+                if ("ready".equals(state)) return d;
+                if ("failed".equals(state)) throw new Exception("hls failed " + d.optString("code", "unknown"));
+                long wait = Math.max(500L, Math.min(4000L, d.optLong("retry_after", 1L) * 1000L));
+                Thread.sleep(wait);
+            }
+            throw new Exception("hls prepare timeout");
+        }
+
+        synchronized byte[] getBytes(String path) throws Exception {
+            if (path == null || !path.startsWith("/")) throw new Exception("unsafe path");
+            if (cookie == null) enroll();
+            HttpURLConnection c = open(BASE + path, "GET");
+            c.setRequestProperty("Cookie", cookie);
+            c.setInstanceFollowRedirects(false);
+            int code = c.getResponseCode();
+            if (code == 302 || code == 303 || code == 401) {
+                drain(c); c.disconnect(); cookie = null; enroll(); return getBytes(path);
+            }
+            if (code < 200 || code >= 300) {
+                drain(c); c.disconnect(); throw new Exception("HTTP " + code + " " + path);
+            }
+            try (InputStream in=c.getInputStream(); ByteArrayOutputStream out=new ByteArrayOutputStream()) {
+                byte[] b=new byte[128*1024]; int n;
+                while((n=in.read(b))!=-1) out.write(b,0,n);
+                return out.toByteArray();
+            } finally { c.disconnect(); }
         }
 
         void played(JSONArray ids) throws Exception {
@@ -430,12 +508,13 @@ public class MainActivity extends Activity {
                 enroll();
                 return post(path, body);
             }
-            if (code == 204) { c.disconnect(); return new JSONObject(); }
+            if (code == 204) { logEvent("API_POST", path + " status=204"); c.disconnect(); return new JSONObject(); }
             if (code < 200 || code >= 300) {
                 drain(c); c.disconnect(); throw new Exception("HTTP " + code);
             }
             String text = readText(c.getInputStream());
             c.disconnect();
+            logEvent("API_POST", path + " status=" + code + " bytes=" + text.length());
             return new JSONObject(text);
         }
     }
@@ -446,23 +525,8 @@ public class MainActivity extends Activity {
         c.setReadTimeout(45000);
         c.setRequestMethod(method);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "BambiniLiving/6.0");
+        c.setRequestProperty("User-Agent", "BambiniLiving/6.2");
         return c;
-    }
-
-    private static byte[] fetchBytes(String url) throws Exception {
-        HttpURLConnection c = open(url,"GET");
-        int code = c.getResponseCode();
-        if (code < 200 || code >= 300) { c.disconnect(); throw new Exception("HTTP " + code + " " + url); }
-        try (InputStream in=c.getInputStream(); ByteArrayOutputStream out=new ByteArrayOutputStream()) {
-            byte[] b=new byte[128*1024]; int n;
-            while((n=in.read(b))!=-1) out.write(b,0,n);
-            return out.toByteArray();
-        } finally { c.disconnect(); }
-    }
-
-    private static String fetchText(String url) throws Exception {
-        return new String(fetchBytes(url), StandardCharsets.UTF_8);
     }
 
     private static String readText(InputStream in) throws Exception {
@@ -479,6 +543,24 @@ public class MainActivity extends Activity {
             if(in==null) in=c.getInputStream();
             if(in!=null){byte[]b=new byte[4096];while(in.read(b)!=-1){}in.close();}
         } catch(Exception ignored){}
+    }
+
+    private static String sha256(byte[] data) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        byte[] d = md.digest(data);
+        StringBuilder b = new StringBuilder();
+        for (byte x : d) b.append(String.format("%02x", x));
+        return b.toString();
+    }
+
+    private static String safeLog(String s) {
+        if (s == null) return "";
+        s = s.replace('\n',' ').replace('\r',' ');
+        return s.length() > 800 ? s.substring(0,800) : s;
+    }
+
+    private static void logEvent(String event, String detail) {
+        Log.i(TAG, safeLog(event) + " | " + safeLog(detail));
     }
 
     private static void writeBytes(File file, byte[] data) throws Exception {
@@ -532,6 +614,7 @@ public class MainActivity extends Activity {
     @Override public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);if(focus)immersive();}
     @Override public void onBackPressed(){web.reload();}
     @Override protected void onDestroy(){
+        logEvent("APP_DESTROY", BUILD);
         control.shutdownNow();prefetch.shutdownNow();
         if(web!=null){web.loadUrl("about:blank");web.destroy();}
         super.onDestroy();
