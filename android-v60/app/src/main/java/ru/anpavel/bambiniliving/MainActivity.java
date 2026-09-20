@@ -68,6 +68,7 @@ public class MainActivity extends Activity {
     private volatile String warmError = "";
     private final Set<String> failedVideos = Collections.synchronizedSet(new HashSet<>());
     private final Set<String> prefetchQueued = Collections.synchronizedSet(new HashSet<>());
+    private final Set<String> leasedVideos = Collections.synchronizedSet(new HashSet<>());
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -190,6 +191,20 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void promoteWarm(String id) {
             if (id == null || !id.matches("\\d+")) return;
             control.execute(() -> promoteTransientToWarm(id));
+        }
+
+        @JavascriptInterface public void leaseVideo(String id) {
+            if (id != null && id.matches("\\d+")) {
+                leasedVideos.add(id);
+                logEvent("CACHE_LEASE", "id=" + id);
+            }
+        }
+
+        @JavascriptInterface public void releaseVideo(String id) {
+            if (id != null) {
+                leasedVideos.remove(id);
+                logEvent("CACHE_RELEASE", "id=" + id);
+            }
         }
 
         @JavascriptInterface public boolean isVideoReady(String id) {
@@ -318,7 +333,10 @@ public class MainActivity extends Activity {
         writeBytes(new File(tmp, ".complete"), Long.toString(System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8));
         deleteTree(dest);
         if (!tmp.renameTo(dest)) throw new Exception("rename failed");
-        if (root == transientRoot) touchTree(dest);
+        if (root == transientRoot) {
+            touchTree(dest);
+            cleanupTransient();
+        }
         failedVideos.remove(id);
         logEvent("HLS_LOCAL_READY", "id=" + id + " pool=" + (root == warmRoot ? "warm" : "transient") + " bytes=" + treeSize(dest));
     }
@@ -473,7 +491,7 @@ public class MainActivity extends Activity {
         File[] dirs = transientRoot.listFiles();
         if (dirs != null) {
             for (File d : dirs) {
-                if (d.isDirectory() && newestMtime(d) < cutoff) deleteTree(d);
+                if (d.isDirectory() && !leasedVideos.contains(d.getName()) && newestMtime(d) < cutoff) deleteTree(d);
             }
         }
 
@@ -482,7 +500,7 @@ public class MainActivity extends Activity {
 
         List<File> keep = new ArrayList<>();
         dirs = transientRoot.listFiles();
-        if (dirs != null) for (File d : dirs) if (d.isDirectory()) keep.add(d);
+        if (dirs != null) for (File d : dirs) if (d.isDirectory() && !leasedVideos.contains(d.getName())) keep.add(d);
         keep.sort(Comparator.comparingLong(MainActivity::newestMtime));
 
         for (File d : keep) {

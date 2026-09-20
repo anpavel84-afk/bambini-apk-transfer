@@ -180,6 +180,8 @@ async function playHls(item,panelData,onReveal){
 
  return new Promise(resolve=>{
   const panel=panelData.panel,poster=panelData.poster;
+  let leased=false;
+  try{App.leaseVideo(String(item.id));leased=true}catch(_){}
   const v=document.createElement('video');
   v.className='visual';
   v.playsInline=true;
@@ -196,6 +198,7 @@ async function playHls(item,panelData,onReveal){
    if(hls){try{hls.destroy()}catch(_){}hls=null}
    try{v.pause()}catch(_){}
    try{v.remove()}catch(_){}
+   if(leased){leased=false;try{App.releaseVideo(String(item.id))}catch(_){}}
   };
   panelData.sceneNode._cleanups.push(cleanup);
 
