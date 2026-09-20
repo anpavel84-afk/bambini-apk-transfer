@@ -1,0 +1,86 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#000"><title>Bambini</title>
+<style>
+html,body,#stage{margin:0;width:100%;height:100%;overflow:hidden;background:#000}
+video.layer{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000;opacity:0;transition:opacity .35s ease;pointer-events:none}
+video::-webkit-media-controls,video::-webkit-media-controls-start-playback-button{display:none!important;-webkit-appearance:none}
+#cover{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000;z-index:5;opacity:1;transition:opacity .28s ease;pointer-events:none}
+#diag{display:none;position:fixed;right:10px;bottom:10px;z-index:9;color:#ddd;background:#000b;padding:5px 8px;font:11px monospace}
+</style></head>
+<body><div id="stage">
+<video id="starter" class="layer" preload="auto" playsinline src="starter.mp4"></video>
+<video id="v0" class="layer" preload="auto" playsinline></video>
+<video id="v1" class="layer" preload="auto" playsinline></video>
+<img id="cover" src="starter.jpg" alt=""><div id="diag"></div>
+</div>
+<script src="hls.min.js"></script><script>
+const ORIGIN='http://169.58.183.182:18080';
+const remoteIds=['18632','18714'];
+const starter=document.getElementById('starter'),cover=document.getElementById('cover'),diag=document.getElementById('diag');
+const slots=[0,1].map(i=>({v:document.getElementById('v'+i),h:null,id:null,ready:false,started:false}));
+let remoteSeq=0,currentRemote=-1,transitioning=false;
+
+function log(x){diag.textContent=x}
+function buffered(v){
+ try{if(!v.buffered.length)return 0;return Math.max(0,v.buffered.end(v.buffered.length-1)-v.currentTime)}catch(_){return 0}
+}
+function destroy(s){
+ if(s.h){try{s.h.destroy()}catch(_){}} s.h=null;s.ready=false;s.started=false;
+ s.v.pause();s.v.removeAttribute('src');s.v.load();s.v.style.opacity='0';
+}
+function nextId(){return remoteIds[remoteSeq++%remoteIds.length]}
+function prepare(idx,id){
+ const s=slots[idx];destroy(s);s.id=id;s.v.muted=true;s.v.volume=1;
+ const url=ORIGIN+'/hlsav/'+id+'/index.m3u8';
+ if(Hls.isSupported()){
+   s.h=new Hls({autoStartLoad:true,startPosition:0,enableWorker:true,maxBufferLength:90,maxMaxBufferLength:120,maxBufferSize:67108864,backBufferLength:5,startFragPrefetch:true,fragLoadingTimeOut:30000});
+   s.h.attachMedia(s.v);
+   s.h.on(Hls.Events.MEDIA_ATTACHED,()=>s.h.loadSource(url));
+   s.h.on(Hls.Events.MANIFEST_PARSED,()=>s.h.startLoad(0));
+   s.h.on(Hls.Events.BUFFER_APPENDED,()=>{
+     if(!s.ready && (buffered(s.v)>=12 || (Number.isFinite(s.v.duration)&&buffered(s.v)>=s.v.duration*.75))){
+       s.ready=true;
+       if(idx===0 && !slots[1].id) prepare(1,nextId());
+     }
+   });
+ } else if(s.v.canPlayType('application/vnd.apple.mpegurl')) {s.v.src=url;s.ready=true}
+}
+function activate(idx){
+ if(transitioning)return;transitioning=true;
+ const s=slots[idx],prev=currentRemote>=0?slots[currentRemote]:starter;
+ s.v.muted=false;s.v.volume=1;
+ const playing=()=>{
+   s.v.removeEventListener('playing',playing);s.started=true;s.v.style.opacity='1';
+   requestAnimationFrame(()=>requestAnimationFrame(()=>{
+     prev.style.opacity='0';
+     setTimeout(()=>{
+       prev.pause();
+       if(prev!==starter){
+         prepare(currentRemote,nextId());
+       }
+       currentRemote=idx;transitioning=false;
+     },380);
+   }));
+ };
+ s.v.addEventListener('playing',playing);
+ s.v.play().catch(e=>log('play '+e.message));
+}
+function waitRemote(idx){
+ const s=slots[idx];
+ if(s.ready || buffered(s.v)>=10) activate(idx); else setTimeout(()=>waitRemote(idx),100);
+}
+slots.forEach((s,i)=>s.v.addEventListener('ended',()=>{if(i===currentRemote)waitRemote(1-i)}));
+
+prepare(0,nextId());
+
+starter.volume=1;starter.muted=false;
+starter.addEventListener('playing',()=>{
+ starter.style.opacity='1';
+ cover.style.opacity='0';
+});
+starter.addEventListener('ended',()=>waitRemote(0));
+starter.play().catch(()=>{
+ starter.muted=true;
+ starter.play().then(()=>{starter.muted=false}).catch(()=>{});
+});
+</script></body></html>
