@@ -127,7 +127,7 @@ public class MainActivity extends Activity {
             try {
                 return api.queue().toString();
             } catch (Exception e) {
-                return new JSONObject().put("error", e.toString()).put("scenes", new JSONArray()).toString();
+                return "{\"scenes\":[]}";
             }
         }
 
