@@ -33,7 +33,7 @@ window.addEventListener('error',e=>diag('WINDOW_ERROR',{message:e.message,source
 window.addEventListener('unhandledrejection',e=>diag('UNHANDLED_REJECTION',String(e.reason)));
 diag('SCRIPT_START',{href:location.href,ua:navigator.userAgent});
 function hideSplash(){if(splash.dataset.hidden)return;splash.dataset.hidden='1';diag('SPLASH_HIDE');splash.style.opacity='0';setTimeout(()=>splash.style.display='none',600)}
-const preloadSet=new Set();
+const PREFETCH_AHEAD=6;
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function warmStatus(){try{return JSON.parse(App.warmStatus()||'{}')}catch(_){return {}}}
@@ -53,11 +53,35 @@ function prefetchScenes(){
  let n=0;
  for(const s of queue){
   for(const id of videoIds(s)){
-   if(n>=3)return;
-   if(!preloadSet.has(id)){preloadSet.add(id);diag('PREFETCH_REQUEST',{id});try{App.prefetchVideo(id)}catch(e){diag('PREFETCH_BRIDGE_ERROR',{id,error:String(e)})}}
+   if(n>=PREFETCH_AHEAD)return;
+   diag('PREFETCH_REQUEST',{id,slot:n});
+   try{App.prefetchVideo(id)}catch(e){diag('PREFETCH_BRIDGE_ERROR',{id,error:String(e)})}
    n++;
   }
  }
+}
+
+function videoStates(scene){
+ return videoIds(scene).map(id=>({id,state:(()=>{try{return App.videoState(id)}catch(_){return 'LOADING'}})()}));
+}
+
+function pickReadySceneIndex(){
+ const limit=Math.min(queue.length,10);
+ for(let i=0;i<limit;i++){
+  const s=queue[i], states=videoStates(s);
+  if(!states.length)return i;
+  if(states.some(x=>x.state==='FAILED')){
+   diag('SCENE_DROP_FAILED',{kind:s.kind,ids:states.map(x=>x.id)});
+   queue.splice(i,1); i--; continue;
+  }
+  if(states.every(x=>x.state==='READY'))return i;
+ }
+ return -1;
+}
+
+function disposeNode(node){
+ try{(node?._cleanups||[]).forEach(fn=>{try{fn()}catch(_){}})}catch(_){}
+ try{node?.remove()}catch(_){}
 }
 
 function refill(){
@@ -97,6 +121,7 @@ async function build(scene){
  const node=document.createElement('section');
  node.className='scene';
  node.dataset.kind=scene.kind;
+ node._cleanups=[];
 
  const panelData=[];
  for(let i=0;i<scene.items.length;i++){
@@ -115,7 +140,7 @@ async function build(scene){
   if(!meta.textContent)meta.style.display='none';
   panel.append(meta);
 
-  panelData.push({panel,item,poster:loaded.img,posterOk:loaded.ok});
+  panelData.push({panel,item,poster:loaded.img,posterOk:loaded.ok,sceneNode:node});
  }
 
  if(scene.kind==='PORTRAIT_VIDEO_CINEMATIC'&&panelData.length===1){
@@ -150,8 +175,8 @@ function fallbackPoster(panelData,ms=4500){
 
 async function playHls(item,panelData,onReveal){
  diag('VIDEO_WAIT',{id:item.id});
- const ok=await waitReady(item.id,18000);
- if(!ok){diag('VIDEO_POSTER_FALLBACK',{id:item.id});return fallbackPoster(panelData,4500)}
+ const ok=await waitReady(item.id,2500);
+ if(!ok){diag('VIDEO_NOT_READY_AT_PLAY',{id:item.id});return false}
 
  return new Promise(resolve=>{
   const panel=panelData.panel,poster=panelData.poster;
@@ -165,23 +190,34 @@ async function playHls(item,panelData,onReveal){
   v.muted=false;
   panel.insertBefore(v,panel.querySelector('.meta'));
 
-  let h=null,finished=false,started=false;
-  let hardTimer=null,startTimer=null;
-  const clean=()=>{
-   clearTimeout(hardTimer);clearTimeout(startTimer);
-   if(h){try{h.destroy()}catch(_){}}
-   v.pause();
-   v.remove();
+  let hls=null,finished=false,started=false,beat=null,startTimer=null,hardTimer=null,promoted=false;
+  const cleanup=()=>{
+   clearTimeout(startTimer);clearTimeout(hardTimer);clearInterval(beat);
+   if(hls){try{hls.destroy()}catch(_){}hls=null}
+   try{v.pause()}catch(_){}
+   try{v.remove()}catch(_){}
   };
-  const done=(hold=900)=>{
+  panelData.sceneNode._cleanups.push(cleanup);
+
+  const promote=()=>{
+   if(promoted||!started)return;
+   promoted=true;
+   try{App.promoteWarm(String(item.id))}catch(_){}
+  };
+  const finish=(keepFrame=true)=>{
    if(finished)return;
    finished=true;
-   setTimeout(()=>{clean();resolve()},hold);
+   clearTimeout(startTimer);clearTimeout(hardTimer);clearInterval(beat);
+   promote();
+   if(!started||!keepFrame)cleanup();
+   else try{v.pause()}catch(_){}
+   resolve(started);
   };
   const reveal=()=>{
    if(started)return;
    started=true;
-   diag('VIDEO_PLAYING',{id:item.id,readyState:v.readyState,width:v.videoWidth,height:v.videoHeight});
+   diag('VIDEO_PLAYING',{id:item.id,readyState:v.readyState,width:v.videoWidth,height:v.videoHeight,time:v.currentTime,muted:v.muted,volume:v.volume});
+   beat=setInterval(()=>diag('VIDEO_HEARTBEAT',{id:item.id,time:Number(v.currentTime.toFixed(2)),readyState:v.readyState,paused:v.paused}),2000);
    if(onReveal)try{onReveal()}catch(_){}
    v.classList.add('playing');
    requestAnimationFrame(()=>requestAnimationFrame(()=>{
@@ -192,14 +228,14 @@ async function playHls(item,panelData,onReveal){
 
   const source=hlsPath(item.id);
   if(Hls.isSupported()){
-   h=new Hls({maxBufferLength:45,maxMaxBufferLength:75,backBufferLength:5,enableWorker:true,startFragPrefetch:true,fragLoadingTimeOut:30000});
-   h.loadSource(source);
-   h.attachMedia(v);
-   h.on(Hls.Events.MANIFEST_PARSED,(_,d)=>{diag('HLS_MANIFEST',{id:item.id,levels:d.levels?.length||0});v.play().catch(e=>{diag('VIDEO_PLAY_REJECT',{id:item.id,error:String(e)});done(4000)})});
-   h.on(Hls.Events.ERROR,(_,d)=>{diag('HLS_ERROR',{id:item.id,type:d.type,details:d.details,fatal:d.fatal,response:d.response?.code});if(d.fatal)done(4000)});
+   hls=new Hls({maxBufferLength:45,maxMaxBufferLength:75,backBufferLength:5,enableWorker:true,startFragPrefetch:true,fragLoadingTimeOut:30000});
+   hls.loadSource(source);
+   hls.attachMedia(v);
+   hls.on(Hls.Events.MANIFEST_PARSED,(_,d)=>{diag('HLS_MANIFEST',{id:item.id,levels:d.levels?.length||0});v.play().catch(e=>{diag('VIDEO_PLAY_REJECT',{id:item.id,error:String(e)});finish(false)})});
+   hls.on(Hls.Events.ERROR,(_,d)=>{diag('HLS_ERROR',{id:item.id,type:d.type,details:d.details,fatal:d.fatal,response:d.response?.code});if(d.fatal)finish(started)});
   }else{
    v.src=source;
-   v.play().catch(e=>{diag('VIDEO_NATIVE_PLAY_REJECT',{id:item.id,error:String(e)});done(4000)});
+   v.play().catch(e=>{diag('VIDEO_NATIVE_PLAY_REJECT',{id:item.id,error:String(e)});finish(false)});
   }
 
   v.addEventListener('loadeddata',()=>diag('VIDEO_LOADEDDATA',{id:item.id,readyState:v.readyState}));
@@ -207,27 +243,31 @@ async function playHls(item,panelData,onReveal){
   v.addEventListener('playing',reveal);
   v.addEventListener('waiting',()=>diag('VIDEO_WAITING',{id:item.id,time:v.currentTime,readyState:v.readyState}));
   v.addEventListener('stalled',()=>diag('VIDEO_STALLED',{id:item.id,time:v.currentTime,readyState:v.readyState}));
-  v.addEventListener('ended',()=>{diag('VIDEO_ENDED',{id:item.id});done(350)});
-  v.addEventListener('error',()=>{diag('VIDEO_ELEMENT_ERROR',{id:item.id,code:v.error?.code,message:v.error?.message});done(4000)});
+  v.addEventListener('ended',()=>{diag('VIDEO_ENDED',{id:item.id,time:v.currentTime});finish(true)});
+  v.addEventListener('error',()=>{diag('VIDEO_ELEMENT_ERROR',{id:item.id,code:v.error?.code,message:v.error?.message});finish(started)});
 
-  startTimer=setTimeout(()=>{if(!started){diag('VIDEO_START_TIMEOUT',{id:item.id});done(4000)}},15000);
-  hardTimer=setTimeout(()=>done(400),((Math.max(8,item.limit||80))+25)*1000);
+  startTimer=setTimeout(()=>{if(!started){diag('VIDEO_START_TIMEOUT',{id:item.id});finish(false)}},6000);
+  hardTimer=setTimeout(()=>{diag('VIDEO_HARD_TIMEOUT',{id:item.id,time:v.currentTime,started});finish(started)},((Math.max(8,item.limit||80))+25)*1000);
  });
 }
 
-async function playScene(scene,built){
+async function playScene(scene,built,onFirstPlaying){
  const vids=scene.items.map((x,i)=>x.type==='video'?i:-1).filter(i=>i>=0);
  if(!vids.length){
   await sleep(Math.max(2500,(scene.duration||8)*1000));
-  return;
+  return true;
  }
- for(const idx of vids){
+ let allStarted=true;
+ for(let k=0;k<vids.length;k++){
+  const idx=vids[k];
   if(scene.kind==='SAME_PERSON_VIDEO_PAIR'){
    built.panelData.forEach((x,j)=>x.panel.classList.toggle('subdued',j!==idx));
   }
-  await playHls(scene.items[idx],built.panelData[idx]);
-  await sleep(700);
+  const started=await playHls(scene.items[idx],built.panelData[idx],k===0?onFirstPlaying:null);
+  if(!started){allStarted=false;diag('VIDEO_ITEM_SKIPPED',{id:scene.items[idx].id,kind:scene.kind});break}
+  await sleep(350);
  }
+ return allStarted;
 }
 
 async function advance(){
@@ -235,26 +275,67 @@ async function advance(){
  if(!queue.length){refill();return}
  running=true;
 
- while(queue.length){
-  const scene=queue.shift();
-  diag('SCENE_BEGIN',{kind:scene.kind,ids:scene.items.map(x=>x.id),queueLeft:queue.length});
+ while(true){
+  if(!queue.length){refill();await sleep(400);if(!queue.length)break}
+  prefetchScenes();
+  const idx=pickReadySceneIndex();
+  if(idx<0){
+   diag('BUFFER_WAIT',{queue:queue.length,states:queue.slice(0,6).map(s=>({kind:s.kind,states:videoStates(s)}))});
+   refill();
+   await sleep(350);
+   continue;
+  }
+
+  const scene=queue.splice(idx,1)[0];
+  diag('SCENE_BEGIN',{kind:scene.kind,ids:scene.items.map(x=>x.id),queueLeft:queue.length,reorderedBy:idx});
   refill();
   prefetchScenes();
 
   let built;
-  try{built=await build(scene)}catch(_){continue}
+  try{built=await build(scene)}catch(e){diag('SCENE_BUILD_ERROR',{kind:scene.kind,error:String(e)});continue}
   const node=built.node,old=current;
-  current=node;
+  const vids=videoIds(scene);
+  if(vids.length && built.panelData.some(x=>x.item.type==='video'&&!x.posterOk)){
+   diag('SCENE_SKIP_POSTER',{kind:scene.kind,ids:vids});
+   disposeNode(node);
+   continue;
+  }
+
   frame.append(node);
 
-  await sleep(60);
-  node.classList.add('visible');
-  if(old)old.classList.remove('visible');
-  await sleep(850);
-  if(old)old.remove();
+  if(vids.length){
+   let revealResolve;
+   const firstPlaying=new Promise(r=>revealResolve=r);
+   const playPromise=playScene(scene,built,()=>revealResolve(true));
+   const started=await Promise.race([firstPlaying,playPromise.then(()=>false),sleep(6500).then(()=>false)]);
+   if(!started){
+    diag('SCENE_SKIP_VIDEO_START',{kind:scene.kind,ids:vids});
+    await playPromise.catch(()=>false);
+    disposeNode(node);
+    continue;
+   }
 
-  try{App.played(JSON.stringify(scene.items.map(x=>x.id)))}catch(_){}
-  try{await playScene(scene,built)}catch(e){diag('SCENE_PLAY_ERROR',{kind:scene.kind,error:String(e)});await sleep(3000)}
+   current=node;
+   node.classList.add('visible');
+   if(old)old.classList.remove('visible');
+   diag('SCENE_VISIBLE',{kind:scene.kind,ids:scene.items.map(x=>x.id),video:true});
+   hideSplash();
+   await sleep(850);
+   if(old)disposeNode(old);
+   try{App.played(JSON.stringify(scene.items.map(x=>x.id)))}catch(_){}
+   const allStarted=await playPromise.catch(e=>{diag('SCENE_PLAY_ERROR',{kind:scene.kind,error:String(e)});return false});
+   if(!allStarted)diag('SCENE_PARTIAL_VIDEO_FAIL',{kind:scene.kind,ids:vids});
+  }else{
+   current=node;
+   node.classList.add('visible');
+   if(old)old.classList.remove('visible');
+   diag('SCENE_VISIBLE',{kind:scene.kind,ids:scene.items.map(x=>x.id),video:false});
+   hideSplash();
+   await sleep(850);
+   if(old)disposeNode(old);
+   try{App.played(JSON.stringify(scene.items.map(x=>x.id)))}catch(_){}
+   await playScene(scene,built);
+  }
   diag('SCENE_END',{kind:scene.kind,ids:scene.items.map(x=>x.id)});
  }
  running=false;
@@ -265,23 +346,35 @@ async function playStarter(){
  const ids=warmIds();
  diag('STARTER_IDS',{ids});
  if(!ids.length)return false;
- starterId=ids[Math.floor(Math.random()*ids.length)];
- diag('STARTER_PICK',{id:starterId});
-
- const fake={id:Number(starterId),limit:80,poster:'/poster/'+starterId,type:'video',person:'',date:''};
- const built=await build({kind:'LANDSCAPE_VIDEO',items:[fake]});
- const node=built.node;
- node.classList.add('visible');
- frame.append(node);
- current=node;
-
- prefetchScenes();
- if(built.panelData[0].posterOk)requestAnimationFrame(()=>requestAnimationFrame(hideSplash));
- await playHls(fake,built.panelData[0],hideSplash);
- try{App.played(JSON.stringify([Number(starterId)]))}catch(_){}
- starterDone=true;
- advance();
- return true;
+ const shuffled=[...ids].sort(()=>Math.random()-.5);
+ for(const id of shuffled){
+  starterId=id;
+  diag('STARTER_PICK',{id:starterId});
+  const fake={id:Number(starterId),limit:80,poster:'/poster/'+starterId,type:'video',person:'',date:''};
+  const built=await build({kind:'LANDSCAPE_VIDEO',items:[fake]});
+  const node=built.node;
+  frame.append(node);
+  let firstResolve;
+  const first=new Promise(r=>firstResolve=r);
+  const playPromise=playHls(fake,built.panelData[0],()=>firstResolve(true));
+  const started=await Promise.race([first,playPromise.then(()=>false),sleep(6500).then(()=>false)]);
+  if(!started){
+   diag('STARTER_FAIL',{id:starterId});
+   await playPromise.catch(()=>false);
+   disposeNode(node);
+   continue;
+  }
+  node.classList.add('visible');
+  current=node;
+  hideSplash();
+  try{App.played(JSON.stringify([Number(starterId)]))}catch(_){}
+  await playPromise;
+  starterDone=true;
+  advance();
+  return true;
+ }
+ diag('STARTER_ALL_FAILED',{ids});
+ return false;
 }
 
 let lastStartupSig='';

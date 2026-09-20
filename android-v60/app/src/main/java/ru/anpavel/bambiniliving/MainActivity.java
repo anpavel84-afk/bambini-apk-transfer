@@ -44,7 +44,7 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String TAG = "BambiniQA";
-    private static final String BUILD = "6.2-diagnostic-hardened";
+    private static final String BUILD = "6.3-playback-gated";
     private static final String BASE = "https://bambini.anpavel.ru";
     private static final String APP_KEY = "_SEs08BNhi4G1ZRKuYI_" + "mimSSeEtOL8WiG1g0qe_" + "5qgoLJVxTEb7Z2_geKZl-Vxn";
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
     private volatile int warmFileTotal = 1;
     private volatile String warmError = "";
     private final Set<String> failedVideos = Collections.synchronizedSet(new HashSet<>());
+    private final Set<String> prefetchQueued = Collections.synchronizedSet(new HashSet<>());
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -130,7 +131,7 @@ public class MainActivity extends Activity {
             JSONObject o = new JSONObject();
             try {
                 JSONArray ready = new JSONArray();
-                for (String id : getWarmIds()) if (isWarmReady(id)) ready.put(id);
+                for (String id : readyWarmIds()) ready.put(id);
                 int pct = warmFileTotal > 0 ? Math.min(100, warmFileDone * 100 / warmFileTotal) : 0;
                 o.put("stage", warmStage).put("id", warmId).put("percent", pct).put("ready", ready).put("error", warmError);
             } catch (Exception ignored) {}
@@ -139,7 +140,7 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface public String warmIds() {
             JSONArray a = new JSONArray();
-            for (String id : getWarmIds()) if (isWarmReady(id)) a.put(id);
+            for (String id : readyWarmIds()) a.put(id);
             return a.toString();
         }
 
@@ -170,17 +171,25 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void prefetchVideo(String id) {
             if (id == null || !id.matches("\\d+")) return;
             if (isWarmReady(id) || isTransientReady(id) || failedVideos.contains(id)) return;
+            if (!prefetchQueued.add(id)) return;
             logEvent("PREFETCH_QUEUE", "id=" + id);
             prefetch.execute(() -> {
                 try {
-                    downloadHlsTo(transientRoot, id, false);
+                    if (!isWarmReady(id) && !isTransientReady(id)) downloadHlsTo(transientRoot, id, true);
                     failedVideos.remove(id);
                     logEvent("PREFETCH_OK", "id=" + id);
                 } catch (Exception e) {
                     failedVideos.add(id);
                     logEvent("PREFETCH_ERROR", "id=" + id + " " + e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
+                } finally {
+                    prefetchQueued.remove(id);
                 }
             });
+        }
+
+        @JavascriptInterface public void promoteWarm(String id) {
+            if (id == null || !id.matches("\\d+")) return;
+            control.execute(() -> promoteTransientToWarm(id));
         }
 
         @JavascriptInterface public boolean isVideoReady(String id) {
@@ -245,22 +254,25 @@ public class MainActivity extends Activity {
     }
 
     private void fillWarmPool(List<String> ids) {
+        List<String> ready = readyWarmIds();
+        if (!ready.isEmpty()) {
+            setWarmProgress("POOL_ACTIVE", ready.get(0), ready.size(), WARM_TARGET, "");
+            return;
+        }
         int pos = 0;
         for (String id : ids) {
             pos++;
-            if (isWarmReady(id)) {
-                setWarmProgress("READY", id, pos, ids.size(), "");
-                continue;
-            }
             try {
                 setWarmProgress("DOWNLOADING", id, 0, 1, "");
                 downloadHlsTo(warmRoot, id, true);
-                setWarmProgress("READY", id, pos, ids.size(), "");
+                setWarmProgress("READY", id, 1, WARM_TARGET, "");
+                logEvent("WARM_STARTER_READY", "id=" + id + " background_fill=played_promotions");
+                return;
             } catch (Exception e) {
                 setWarmProgress("ERROR", id, pos, ids.size(), e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
             }
         }
-        setWarmProgress("POOL_COMPLETE", "", ids.size(), Math.max(1, ids.size()), warmError);
+        setWarmProgress("ERROR", "", 0, 1, "no warm starter could be prepared");
     }
 
     private void setWarmProgress(String stage, String id, int done, int total, String error) {
@@ -309,6 +321,53 @@ public class MainActivity extends Activity {
         if (root == transientRoot) touchTree(dest);
         failedVideos.remove(id);
         logEvent("HLS_LOCAL_READY", "id=" + id + " pool=" + (root == warmRoot ? "warm" : "transient") + " bytes=" + treeSize(dest));
+    }
+
+    private List<String> readyWarmIds() {
+        List<String> out = new ArrayList<>();
+        File[] dirs = warmRoot.listFiles();
+        if (dirs != null) {
+            List<File> candidates = new ArrayList<>();
+            for (File d : dirs) {
+                if (d.isDirectory() && d.getName().matches("\\d+") &&
+                        new File(d, ".complete").isFile() &&
+                        new File(d, "index.m3u8").isFile() &&
+                        new File(d, "poster.jpg").isFile()) candidates.add(d);
+            }
+            candidates.sort((a,b) -> Long.compare(b.lastModified(), a.lastModified()));
+            for (File d : candidates) {
+                out.add(d.getName());
+                if (out.size() >= WARM_TARGET) break;
+            }
+        }
+        return out;
+    }
+
+    private void promoteTransientToWarm(String id) {
+        try {
+            if (isWarmReady(id)) return;
+            List<String> ready = readyWarmIds();
+            if (ready.size() >= WARM_TARGET) return;
+            if (!isTransientReady(id)) return;
+            File src = new File(transientRoot, id);
+            File poster = new File(src, "poster.jpg");
+            if (!poster.isFile()) writeBytes(poster, api.getBytes("/poster/" + id));
+            File dst = new File(warmRoot, id);
+            deleteTree(dst);
+            if (!src.renameTo(dst)) {
+                logEvent("WARM_PROMOTE_ERROR", "id=" + id + " rename_failed");
+                return;
+            }
+            dst.setLastModified(System.currentTimeMillis());
+            LinkedHashSet<String> prefs = new LinkedHashSet<>(ready);
+            prefs.add(id);
+            List<String> saved = new ArrayList<>(prefs);
+            if (saved.size() > WARM_TARGET) saved = saved.subList(0, WARM_TARGET);
+            getPreferences(MODE_PRIVATE).edit().putString("warm_ids", new JSONArray(saved).toString()).apply();
+            logEvent("WARM_PROMOTED", "id=" + id + " ready=" + readyWarmIds().size() + "/" + WARM_TARGET);
+        } catch (Exception e) {
+            logEvent("WARM_PROMOTE_ERROR", "id=" + id + " " + e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
+        }
     }
 
     private boolean isWarmReady(String id) {
@@ -525,7 +584,7 @@ public class MainActivity extends Activity {
         c.setReadTimeout(45000);
         c.setRequestMethod(method);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "BambiniLiving/6.2");
+        c.setRequestProperty("User-Agent", "BambiniLiving/6.3");
         return c;
     }
 
