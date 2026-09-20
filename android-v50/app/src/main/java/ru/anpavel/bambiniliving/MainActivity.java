@@ -11,7 +11,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 public class MainActivity extends Activity {
-    private static final String URL = "http://169.58.183.182:18080/apk.html";
+    private static final String URL = "http://169.58.183.182:18080/apk-v51.html";
     private WebView web;
 
     @Override public void onCreate(Bundle state) {
