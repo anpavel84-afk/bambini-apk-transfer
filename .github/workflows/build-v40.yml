@@ -1,0 +1,41 @@
+name: Build Bambini v4 local media
+on:
+  push:
+    paths:
+      - 'android-v40/**'
+      - '.github/workflows/build-v40.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Restore source
+        working-directory: android-v40
+        run: |
+          mkdir -p app/src/main/java/ru/anpavel/bambiniliving
+          base64 -d MainActivity.java.gz.b64 | gzip -dc > app/src/main/java/ru/anpavel/bambiniliving/MainActivity.java
+      - name: Build
+        working-directory: android-v40
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+          unzip -q gradle-8.14.3-bin.zip
+          ./gradle-8.14.3/bin/gradle :app:assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v4-local-media.apk
+      - name: Publish APK
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add Bambini-Living-v4-local-media.apk
+          git commit -m "Publish Bambini Living v4 local-media APK" || exit 0
+          git push
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bambini-Living-v4-local-media
+          path: Bambini-Living-v4-local-media.apk

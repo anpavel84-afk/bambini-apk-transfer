@@ -1,0 +1,5 @@
+plugins { id 'com.android.application' }
+android { namespace 'ru.anpavel.bambiniliving'; compileSdk 36
+ defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 7; versionName '4.0-local-media' }
+ compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+}
