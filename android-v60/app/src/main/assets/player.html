@@ -28,6 +28,7 @@ video::-webkit-media-controls,video::-webkit-media-controls-start-playback-butto
 <script src="/assets/hls.min.js"></script><script>
 const frame=document.getElementById('frame'),splash=document.getElementById('splash'),fill=document.getElementById('fill');
 let queue=[],running=false,current=null,starterDone=false,refilling=false,starterId=null;
+function hideSplash(){if(splash.dataset.hidden)return;splash.dataset.hidden='1';splash.style.opacity='0';setTimeout(()=>splash.style.display='none',600)}
 const preloadSet=new Set();
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -140,7 +141,7 @@ function fallbackPoster(panelData,ms=4500){
  return sleep(ms);
 }
 
-async function playHls(item,panelData){
+async function playHls(item,panelData,onReveal){
  const ok=await waitReady(item.id,18000);
  if(!ok)return fallbackPoster(panelData,4500);
 
@@ -172,6 +173,7 @@ async function playHls(item,panelData){
   const reveal=()=>{
    if(started)return;
    started=true;
+   if(onReveal)try{onReveal()}catch(_){}
    v.classList.add('playing');
    requestAnimationFrame(()=>requestAnimationFrame(()=>{
     poster.style.opacity='0';
@@ -258,7 +260,8 @@ async function playStarter(){
  current=node;
 
  prefetchScenes();
- await playHls(fake,built.panelData[0]);
+ if(built.panelData[0].posterOk)requestAnimationFrame(()=>requestAnimationFrame(hideSplash));
+ await playHls(fake,built.panelData[0],hideSplash);
  try{App.played(JSON.stringify([Number(starterId)]))}catch(_){}
  starterDone=true;
  advance();
@@ -269,8 +272,6 @@ function startup(){
  const s=warmStatus(),ids=warmIds();
  fill.style.width=(s.percent||0)+'%';
  if(ids.length){
-  splash.style.opacity='0';
-  setTimeout(()=>splash.style.display='none',600);
   playStarter();
   refill();
   return;

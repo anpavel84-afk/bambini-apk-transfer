@@ -1,4 +1,4 @@
 plugins { id 'com.android.application' }
 android { namespace 'ru.anpavel.bambiniliving'; compileSdk 35
- defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 15; versionName '6.1-production-hardened' }
+ defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 16; versionName '6.2-startup-gap-fix' }
 }
