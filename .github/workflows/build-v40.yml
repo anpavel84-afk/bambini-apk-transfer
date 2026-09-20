@@ -20,7 +20,7 @@ jobs:
         working-directory: android-v40
         run: |
           mkdir -p app/src/main/java/ru/anpavel/bambiniliving
-          base64 -d MainActivity.java.gz.b64 | gzip -dc > app/src/main/java/ru/anpavel/bambiniliving/MainActivity.java
+          cat MainActivity.java.gz.b64.part1 MainActivity.java.gz.b64.part2 MainActivity.java.gz.b64.part3 MainActivity.java.gz.b64.part4 MainActivity.java.gz.b64.part5 | base64 -d | gzip -dc > app/src/main/java/ru/anpavel/bambiniliving/MainActivity.java
       - name: Build
         working-directory: android-v40
         run: |
