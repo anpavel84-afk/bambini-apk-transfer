@@ -1,0 +1,21 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'ru.anpavel.bambiniliving'
+    compileSdk 35
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+    defaultConfig {
+        applicationId 'ru.anpavel.bambiniliving'
+        minSdk 23
+        targetSdk 35
+        versionCode 5
+        versionName '3.0-native'
+    }
+}
+
+dependencies {
+    implementation 'androidx.media3:media3-exoplayer:1.11.1'
+    implementation 'androidx.media3:media3-ui:1.11.1'
+    implementation 'androidx.media3:media3-datasource:1.11.1'
+    implementation 'androidx.media3:media3-database:1.11.1'
+}
