@@ -6,7 +6,7 @@ android {
     applicationId 'ru.anpavel.bambiniliving'
     minSdk 23
     targetSdk 35
-    versionCode 8
-    versionName '5.0-hls-test'
+    versionCode 9
+    versionName '5.1-hls-av-preload'
   }
 }
