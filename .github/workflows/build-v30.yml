@@ -1,4 +1,4 @@
-name: Build Bambini v3 native
+name: Build Bambini v3.1 native
 on:
   push:
     paths:
@@ -27,15 +27,15 @@ jobs:
           wget -q https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
           unzip -q gradle-8.14.3-bin.zip
           ./gradle-8.14.3/bin/gradle :app:assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v3-native.apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v3.1-native.apk
       - name: Publish APK
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add Bambini-Living-v3-native.apk
-          git commit -m "Publish Bambini Living v3 native APK" || exit 0
+          git add Bambini-Living-v3.1-native.apk
+          git commit -m "Publish Bambini Living v3.1 native APK" || exit 0
           git push
       - uses: actions/upload-artifact@v4
         with:
-          name: Bambini-Living-v3-native
-          path: Bambini-Living-v3-native.apk
+          name: Bambini-Living-v3.1-native
+          path: Bambini-Living-v3.1-native.apk
