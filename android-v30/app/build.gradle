@@ -2,7 +2,7 @@ plugins { id 'com.android.application' }
 
 android {
     namespace 'ru.anpavel.bambiniliving'
-    compileSdk 35
+    compileSdk 36
     compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
     defaultConfig {
         applicationId 'ru.anpavel.bambiniliving'
