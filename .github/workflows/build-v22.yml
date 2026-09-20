@@ -14,7 +14,6 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - name: Build
         working-directory: android-v22
         run: |
