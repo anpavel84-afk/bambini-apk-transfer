@@ -44,7 +44,7 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String TAG = "BambiniQA";
-    private static final String BUILD = "6.5-cinematic-prefetch";
+    private static final String BUILD = "6.6-tv-ambient";
     private static final String BASE = "https://bambini.anpavel.ru";
     private static final String APP_KEY = "_SEs08BNhi4G1ZRKuYI_" + "mimSSeEtOL8WiG1g0qe_" + "5qgoLJVxTEb7Z2_geKZl-Vxn";
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
@@ -608,7 +608,7 @@ public class MainActivity extends Activity {
         c.setReadTimeout(45000);
         c.setRequestMethod(method);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "BambiniLiving/6.5");
+        c.setRequestProperty("User-Agent", "BambiniLiving/6.6");
         return c;
     }
 
