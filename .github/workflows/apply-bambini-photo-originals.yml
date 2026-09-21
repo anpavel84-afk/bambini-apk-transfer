@@ -26,8 +26,9 @@ jobs:
           nohup sudo /tmp/ts/tailscale --socket=/tmp/tailscaled.sock up \
             --hostname=github-bambini-photo-patch \
             --accept-dns=false \
+            --json \
             >/tmp/tailscale-up.log 2>&1 &
-          sleep 8
+          sleep 15
           cp /tmp/tailscale-up.log /tmp/tailscale-auth.txt
           echo "Temporary Tailscale login requested."
 
