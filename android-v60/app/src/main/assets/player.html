@@ -30,9 +30,11 @@ video::-webkit-media-controls,video::-webkit-media-controls-start-playback-butto
 <script src="/assets/hls.min.js"></script><script>
 const frame=document.getElementById('frame'),splash=document.getElementById('splash'),fill=document.getElementById('fill');
 let queue=[],running=false,current=null,starterDone=false,refilling=false,starterId=null;
+let hostSuspended=false;
 function diag(event,detail=''){try{console.info('[Bambini]',event,detail);App.diag(String(event),typeof detail==='string'?detail:JSON.stringify(detail))}catch(_){}}
 
 window.bambiniHostPause=()=>{
+ hostSuspended=true;
  let paused=0;
  document.querySelectorAll('video').forEach(v=>{
   try{
@@ -44,11 +46,13 @@ window.bambiniHostPause=()=>{
  return paused;
 };
 window.bambiniHostResume=()=>{
+ hostSuspended=false;
  let resumed=0;
  document.querySelectorAll('video').forEach(v=>{
   try{
-   if(v.dataset.bambiniResume==='1'){
+   if(v.dataset.bambiniResume==='1'||v.dataset.bambiniPendingPlay==='1'){
     v.dataset.bambiniResume='0';
+    v.dataset.bambiniPendingPlay='0';
     v.play().then(()=>diag('HOST_VIDEO_RESUMED',{time:v.currentTime})).catch(e=>diag('HOST_RESUME_REJECT',String(e)));
     resumed++;
    }
@@ -58,6 +62,7 @@ window.bambiniHostResume=()=>{
  return resumed;
 };
 window.bambiniHostStop=()=>{
+ hostSuspended=true;
  let stopped=0;
  document.querySelectorAll('video,audio').forEach(v=>{
   try{v.pause();v.muted=true;v.removeAttribute('src');v.load?.();stopped++}catch(_){}
@@ -268,11 +273,16 @@ async function playHls(item,panelData,onReveal){
    hls=new Hls({maxBufferLength:45,maxMaxBufferLength:75,backBufferLength:5,enableWorker:true,startFragPrefetch:true,fragLoadingTimeOut:30000});
    hls.loadSource(source);
    hls.attachMedia(v);
-   hls.on(Hls.Events.MANIFEST_PARSED,(_,d)=>{diag('HLS_MANIFEST',{id:item.id,levels:d.levels?.length||0});v.play().catch(e=>{diag('VIDEO_PLAY_REJECT',{id:item.id,error:String(e)});finish(false)})});
+   hls.on(Hls.Events.MANIFEST_PARSED,(_,d)=>{
+    diag('HLS_MANIFEST',{id:item.id,levels:d.levels?.length||0});
+    if(hostSuspended){v.dataset.bambiniPendingPlay='1';diag('HOST_PLAY_DEFERRED',{id:item.id});return}
+    v.play().catch(e=>{diag('VIDEO_PLAY_REJECT',{id:item.id,error:String(e)});finish(false)});
+   });
    hls.on(Hls.Events.ERROR,(_,d)=>{diag('HLS_ERROR',{id:item.id,type:d.type,details:d.details,fatal:d.fatal,response:d.response?.code});if(d.fatal)finish(started)});
   }else{
    v.src=source;
-   v.play().catch(e=>{diag('VIDEO_NATIVE_PLAY_REJECT',{id:item.id,error:String(e)});finish(false)});
+   if(hostSuspended){v.dataset.bambiniPendingPlay='1';diag('HOST_PLAY_DEFERRED',{id:item.id})}
+   else v.play().catch(e=>{diag('VIDEO_NATIVE_PLAY_REJECT',{id:item.id,error:String(e)});finish(false)});
   }
 
   v.addEventListener('loadeddata',()=>diag('VIDEO_LOADEDDATA',{id:item.id,readyState:v.readyState}));

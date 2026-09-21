@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
     private long lastBackAt = 0L;
     private AlertDialog exitDialog;
     private boolean hostPaused = false;
+    private boolean exiting = false;
 
     private volatile String warmStage = "START";
     private volatile String warmId = "";
@@ -709,13 +710,11 @@ public class MainActivity extends Activity {
             web.evaluateJavascript("window.bambiniHostPause&&window.bambiniHostPause()", null);
         } catch (Exception ignored) {}
         web.onPause();
-        web.pauseTimers();
     }
 
     private void resumeHostPlayback(String reason) {
-        if (web == null || !hostPaused || isFinishing()) return;
+        if (web == null || !hostPaused || isFinishing() || exiting) return;
         hostPaused = false;
-        web.resumeTimers();
         web.onResume();
         try {
             web.evaluateJavascript("window.bambiniHostResume&&window.bambiniHostResume()", null);
@@ -740,6 +739,7 @@ public class MainActivity extends Activity {
                 .setMessage("Слайд-шоу и звук будут остановлены.")
                 .setPositiveButton("Да", (dialog, which) -> {
                     logEvent("APP_EXIT_CONFIRMED", "yes");
+                    exiting = true;
                     if (web != null) {
                         try { web.evaluateJavascript("window.bambiniHostStop&&window.bambiniHostStop()", null); } catch (Exception ignored) {}
                         web.stopLoading();
