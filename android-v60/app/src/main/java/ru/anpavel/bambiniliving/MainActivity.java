@@ -47,7 +47,7 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String TAG = "BambiniQA";
-    private static final String BUILD = "6.8-local-mp4-smooth";
+    private static final String BUILD = "6.9-tv-render-stable";
     private static final String BASE = "https://bambini.anpavel.ru";
     private static final String APP_KEY = "_SEs08BNhi4G1ZRKuYI_" + "mimSSeEtOL8WiG1g0qe_" + "5qgoLJVxTEb7Z2_geKZl-Vxn";
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
@@ -58,7 +58,7 @@ public class MainActivity extends Activity {
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService control = Executors.newSingleThreadExecutor();
-    private final ExecutorService prefetch = Executors.newFixedThreadPool(3);
+    private final ExecutorService prefetch = Executors.newSingleThreadExecutor();
 
     private WebView web;
     private File warmRoot;
@@ -68,6 +68,7 @@ public class MainActivity extends Activity {
     private AlertDialog exitDialog;
     private boolean hostPaused = false;
     private boolean exiting = false;
+    private volatile boolean playbackActive = false;
 
     private volatile String warmStage = "START";
     private volatile String warmId = "";
@@ -93,7 +94,8 @@ public class MainActivity extends Activity {
 
         web = new WebView(this);
         web.setBackgroundColor(Color.rgb(16,17,15));
-        web.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        // Do not force the whole WebView into an off-screen hardware layer.
+        // Default HW acceleration lets Android TV use the most efficient video composition path.
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -105,7 +107,7 @@ public class MainActivity extends Activity {
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
         web.addJavascriptInterface(new AppBridge(), "App");
-        WebView.setWebContentsDebuggingEnabled(true);
+        WebView.setWebContentsDebuggingEnabled(false);
         web.setWebChromeClient(new WebChromeClient() {
             @Override public boolean onConsoleMessage(ConsoleMessage cm) {
                 logEvent("WEB_CONSOLE", cm.messageLevel() + " " + cm.sourceId() + ":" + cm.lineNumber() + " " + cm.message());
@@ -221,6 +223,11 @@ public class MainActivity extends Activity {
                 leasedVideos.remove(id);
                 logEvent("CACHE_RELEASE", "id=" + id);
             }
+        }
+
+        @JavascriptInterface public void setPlaybackActive(boolean active) {
+            playbackActive = active;
+            logEvent("PLAYBACK_IO_MODE", active ? "video-active" : "video-idle");
         }
 
         @JavascriptInterface public boolean isVideoReady(String id) {
@@ -620,6 +627,10 @@ public class MainActivity extends Activity {
                     total += n;
                     if (total > maxBytes) throw new Exception("mp4 over limit " + total);
                     out.write(b,0,n);
+                    // Cheap TV flash can periodically block video decode when a large
+                    // background file is written at full speed. Keep one prefetch worker
+                    // and heavily yield I/O while a video is actually on screen.
+                    if (playbackActive) Thread.sleep(90L);
                 }
                 out.getFD().sync();
             } finally {
@@ -669,7 +680,7 @@ public class MainActivity extends Activity {
         c.setReadTimeout(45000);
         c.setRequestMethod(method);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "BambiniLiving/6.8");
+        c.setRequestProperty("User-Agent", "BambiniLiving/6.9");
         return c;
     }
 

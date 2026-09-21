@@ -1,4 +1,4 @@
 plugins { id 'com.android.application' }
 android { namespace 'ru.anpavel.bambiniliving'; compileSdk 35
- defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 23; versionName '6.8-local-mp4-smooth' }
+ defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 24; versionName '6.9-tv-render-stable' }
 }

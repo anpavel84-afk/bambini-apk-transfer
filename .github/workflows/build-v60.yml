@@ -1,4 +1,4 @@
-name: Build Bambini v6.8 local MP4 smooth
+name: Build Bambini v6.9 TV render stable
 on:
   push:
     paths:
@@ -27,15 +27,15 @@ jobs:
           wget -q https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
           unzip -q gradle-8.14.3-bin.zip
           ./gradle-8.14.3/bin/gradle :app:assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v6.8-local-mp4-smooth.apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v6.9-tv-render-stable.apk
       - name: Publish APK
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add Bambini-Living-v6.8-local-mp4-smooth.apk
-          git commit -m "Publish Bambini Living v6.8 local MP4 smooth APK" || exit 0
+          git add Bambini-Living-v6.9-tv-render-stable.apk
+          git commit -m "Publish Bambini Living v6.9 TV render stable APK" || exit 0
           git push
       - uses: actions/upload-artifact@v4
         with:
-          name: Bambini-Living-v6.8-local-mp4-smooth
-          path: Bambini-Living-v6.8-local-mp4-smooth.apk
+          name: Bambini-Living-v6.9-tv-render-stable
+          path: Bambini-Living-v6.9-tv-render-stable.apk
