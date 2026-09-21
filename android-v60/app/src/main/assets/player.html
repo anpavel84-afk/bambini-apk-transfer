@@ -31,6 +31,40 @@ video::-webkit-media-controls,video::-webkit-media-controls-start-playback-butto
 const frame=document.getElementById('frame'),splash=document.getElementById('splash'),fill=document.getElementById('fill');
 let queue=[],running=false,current=null,starterDone=false,refilling=false,starterId=null;
 function diag(event,detail=''){try{console.info('[Bambini]',event,detail);App.diag(String(event),typeof detail==='string'?detail:JSON.stringify(detail))}catch(_){}}
+
+window.bambiniHostPause=()=>{
+ let paused=0;
+ document.querySelectorAll('video').forEach(v=>{
+  try{
+   v.dataset.bambiniResume=(!v.paused&&!v.ended)?'1':'0';
+   if(!v.paused){v.pause();paused++}
+  }catch(_){}
+ });
+ diag('HOST_PAUSE',{paused});
+ return paused;
+};
+window.bambiniHostResume=()=>{
+ let resumed=0;
+ document.querySelectorAll('video').forEach(v=>{
+  try{
+   if(v.dataset.bambiniResume==='1'){
+    v.dataset.bambiniResume='0';
+    v.play().then(()=>diag('HOST_VIDEO_RESUMED',{time:v.currentTime})).catch(e=>diag('HOST_RESUME_REJECT',String(e)));
+    resumed++;
+   }
+  }catch(_){}
+ });
+ diag('HOST_RESUME',{resumed});
+ return resumed;
+};
+window.bambiniHostStop=()=>{
+ let stopped=0;
+ document.querySelectorAll('video,audio').forEach(v=>{
+  try{v.pause();v.muted=true;v.removeAttribute('src');v.load?.();stopped++}catch(_){}
+ });
+ diag('HOST_STOP',{stopped});
+ return stopped;
+};
 window.addEventListener('error',e=>diag('WINDOW_ERROR',{message:e.message,source:e.filename,line:e.lineno,col:e.colno}));
 window.addEventListener('unhandledrejection',e=>diag('UNHANDLED_REJECTION',String(e.reason)));
 diag('SCRIPT_START',{href:location.href,ua:navigator.userAgent});

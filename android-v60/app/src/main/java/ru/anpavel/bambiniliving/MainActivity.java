@@ -1,6 +1,7 @@
 package ru.anpavel.bambiniliving;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
@@ -8,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.View;
+import android.view.KeyEvent;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ConsoleMessage;
@@ -18,6 +20,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -44,13 +47,14 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String TAG = "BambiniQA";
-    private static final String BUILD = "6.6-tv-ambient";
+    private static final String BUILD = "6.7-tv-exit-lifecycle";
     private static final String BASE = "https://bambini.anpavel.ru";
     private static final String APP_KEY = "_SEs08BNhi4G1ZRKuYI_" + "mimSSeEtOL8WiG1g0qe_" + "5qgoLJVxTEb7Z2_geKZl-Vxn";
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
     private static final int WARM_TARGET = 10;
     private static final long TRANSIENT_TTL_MS = 10L * 60L * 1000L;
     private static final long TRANSIENT_MAX_BYTES = 300L * 1024L * 1024L;
+    private static final long BACK_DOUBLE_MS = 2200L;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService control = Executors.newSingleThreadExecutor();
@@ -60,6 +64,9 @@ public class MainActivity extends Activity {
     private File warmRoot;
     private File transientRoot;
     private Api api;
+    private long lastBackAt = 0L;
+    private AlertDialog exitDialog;
+    private boolean hostPaused = false;
 
     private volatile String warmStage = "START";
     private volatile String warmId = "";
@@ -694,12 +701,103 @@ public class MainActivity extends Activity {
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 
-    @Override public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);if(focus)immersive();}
-    @Override public void onBackPressed(){web.reload();}
+    private void pauseHostPlayback(String reason) {
+        if (web == null || hostPaused) return;
+        hostPaused = true;
+        logEvent("APP_BACKGROUND_PAUSE", reason);
+        try {
+            web.evaluateJavascript("window.bambiniHostPause&&window.bambiniHostPause()", null);
+        } catch (Exception ignored) {}
+        web.onPause();
+        web.pauseTimers();
+    }
+
+    private void resumeHostPlayback(String reason) {
+        if (web == null || !hostPaused || isFinishing()) return;
+        hostPaused = false;
+        web.resumeTimers();
+        web.onResume();
+        try {
+            web.evaluateJavascript("window.bambiniHostResume&&window.bambiniHostResume()", null);
+        } catch (Exception ignored) {}
+        logEvent("APP_FOREGROUND_RESUME", reason);
+        immersive();
+    }
+
+    private void handleBackExit() {
+        long now = System.currentTimeMillis();
+        if (exitDialog != null && exitDialog.isShowing()) return;
+        if (now - lastBackAt > BACK_DOUBLE_MS) {
+            lastBackAt = now;
+            Toast.makeText(this, "Нажмите Назад ещё раз для выхода", Toast.LENGTH_SHORT).show();
+            logEvent("BACK_ARMED", "waiting second press");
+            return;
+        }
+        lastBackAt = 0L;
+        pauseHostPlayback("exit-confirm");
+        exitDialog = new AlertDialog.Builder(this)
+                .setTitle("Закрыть Bambini?")
+                .setMessage("Слайд-шоу и звук будут остановлены.")
+                .setPositiveButton("Да", (dialog, which) -> {
+                    logEvent("APP_EXIT_CONFIRMED", "yes");
+                    if (web != null) {
+                        try { web.evaluateJavascript("window.bambiniHostStop&&window.bambiniHostStop()", null); } catch (Exception ignored) {}
+                        web.stopLoading();
+                    }
+                    finishAndRemoveTask();
+                })
+                .setNegativeButton("Нет", (dialog, which) -> {
+                    logEvent("APP_EXIT_CONFIRMED", "no");
+                    resumeHostPlayback("exit-cancel");
+                })
+                .setOnCancelListener(dialog -> resumeHostPlayback("exit-cancel"))
+                .setOnDismissListener(dialog -> {
+                    exitDialog = null;
+                    if (!isFinishing()) resumeHostPlayback("exit-dismiss");
+                })
+                .create();
+        exitDialog.setOnShowListener(dialog -> exitDialog.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus());
+        exitDialog.show();
+    }
+
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == KeyEvent.ACTION_UP) handleBackExit();
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override public void onBackPressed(){ handleBackExit(); }
+
+    @Override protected void onPause() {
+        pauseHostPlayback("activity-pause");
+        super.onPause();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        main.postDelayed(() -> resumeHostPlayback("activity-resume"), 80);
+    }
+
+    @Override protected void onStop() {
+        pauseHostPlayback("activity-stop");
+        super.onStop();
+    }
+
+    @Override public void onWindowFocusChanged(boolean focus){
+        super.onWindowFocusChanged(focus);
+        if(focus) immersive();
+    }
+
     @Override protected void onDestroy(){
         logEvent("APP_DESTROY", BUILD);
         control.shutdownNow();prefetch.shutdownNow();
-        if(web!=null){web.loadUrl("about:blank");web.destroy();}
+        if(exitDialog!=null){try{exitDialog.dismiss();}catch(Exception ignored){}exitDialog=null;}
+        if(web!=null){
+            try{web.evaluateJavascript("window.bambiniHostStop&&window.bambiniHostStop()",null);}catch(Exception ignored){}
+            web.loadUrl("about:blank");web.destroy();
+        }
         super.onDestroy();
     }
 }
