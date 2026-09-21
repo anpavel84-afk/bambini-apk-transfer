@@ -9,7 +9,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.View;
-import android.view.KeyEvent;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ConsoleMessage;
@@ -47,7 +46,7 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String TAG = "BambiniQA";
-    private static final String BUILD = "6.9-tv-render-stable";
+    private static final String BUILD = "7.0-v66-playback-minimal-exit";
     private static final String BASE = "https://bambini.anpavel.ru";
     private static final String APP_KEY = "_SEs08BNhi4G1ZRKuYI_" + "mimSSeEtOL8WiG1g0qe_" + "5qgoLJVxTEb7Z2_geKZl-Vxn";
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
@@ -58,7 +57,7 @@ public class MainActivity extends Activity {
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService control = Executors.newSingleThreadExecutor();
-    private final ExecutorService prefetch = Executors.newSingleThreadExecutor();
+    private final ExecutorService prefetch = Executors.newFixedThreadPool(3);
 
     private WebView web;
     private File warmRoot;
@@ -66,9 +65,6 @@ public class MainActivity extends Activity {
     private Api api;
     private long lastBackAt = 0L;
     private AlertDialog exitDialog;
-    private boolean hostPaused = false;
-    private boolean exiting = false;
-    private volatile boolean playbackActive = false;
 
     private volatile String warmStage = "START";
     private volatile String warmId = "";
@@ -87,15 +83,12 @@ public class MainActivity extends Activity {
         transientRoot = new File(getCacheDir(), "bambini-stream-v2");
         warmRoot.mkdirs();
         transientRoot.mkdirs();
-        cleanupLegacySegmentCaches(warmRoot);
-        cleanupLegacySegmentCaches(transientRoot);
         api = new Api();
         logEvent("APP_CREATE", "build=" + BUILD + " warm=" + warmRoot + " transient=" + transientRoot);
 
         web = new WebView(this);
         web.setBackgroundColor(Color.rgb(16,17,15));
-        // Do not force the whole WebView into an off-screen hardware layer.
-        // Default HW acceleration lets Android TV use the most efficient video composition path.
+        web.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -107,7 +100,7 @@ public class MainActivity extends Activity {
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
         web.addJavascriptInterface(new AppBridge(), "App");
-        WebView.setWebContentsDebuggingEnabled(false);
+        WebView.setWebContentsDebuggingEnabled(true);
         web.setWebChromeClient(new WebChromeClient() {
             @Override public boolean onConsoleMessage(ConsoleMessage cm) {
                 logEvent("WEB_CONSOLE", cm.messageLevel() + " " + cm.sourceId() + ":" + cm.lineNumber() + " " + cm.message());
@@ -194,7 +187,7 @@ public class MainActivity extends Activity {
             logEvent("PREFETCH_QUEUE", "id=" + id);
             prefetch.execute(() -> {
                 try {
-                    if (!isWarmReady(id) && !isTransientReady(id)) downloadMp4To(transientRoot, id, true);
+                    if (!isWarmReady(id) && !isTransientReady(id)) downloadHlsTo(transientRoot, id, true);
                     failedVideos.remove(id);
                     logEvent("PREFETCH_OK", "id=" + id);
                 } catch (Exception e) {
@@ -223,11 +216,6 @@ public class MainActivity extends Activity {
                 leasedVideos.remove(id);
                 logEvent("CACHE_RELEASE", "id=" + id);
             }
-        }
-
-        @JavascriptInterface public void setPlaybackActive(boolean active) {
-            playbackActive = active;
-            logEvent("PLAYBACK_IO_MODE", active ? "video-active" : "video-idle");
         }
 
         @JavascriptInterface public boolean isVideoReady(String id) {
@@ -302,7 +290,7 @@ public class MainActivity extends Activity {
             pos++;
             try {
                 setWarmProgress("DOWNLOADING", id, 0, 1, "");
-                downloadMp4To(warmRoot, id, true);
+                downloadHlsTo(warmRoot, id, true);
                 setWarmProgress("READY", id, 1, WARM_TARGET, "");
                 logEvent("WARM_STARTER_READY", "id=" + id + " background_fill=played_promotions");
                 return;
@@ -322,12 +310,10 @@ public class MainActivity extends Activity {
         logEvent("WARM_" + safeLog(stage), "id=" + warmId + " " + done + "/" + warmFileTotal + (warmError.isEmpty() ? "" : " error=" + warmError));
     }
 
-    private void downloadMp4To(File root, String id, boolean withPoster) throws Exception {
+    private void downloadHlsTo(File root, String id, boolean withPoster) throws Exception {
         File dest = new File(root, id);
-        File ready = new File(dest, ".complete");
-        File video = new File(dest, "video.mp4");
-        if (ready.isFile() && video.isFile() && video.length() > 0) {
-            logEvent("MP4_LOCAL_HIT", "id=" + id + " pool=" + (root == warmRoot ? "warm" : "transient"));
+        if (new File(dest, ".complete").isFile() && new File(dest, "index.m3u8").isFile()) {
+            logEvent("HLS_LOCAL_HIT", "id=" + id + " pool=" + (root == warmRoot ? "warm" : "transient"));
             return;
         }
 
@@ -335,17 +321,27 @@ public class MainActivity extends Activity {
         deleteTree(tmp);
         tmp.mkdirs();
 
-        logEvent("MP4_DOWNLOAD_START", "id=" + id);
-        File tmpVideo = new File(tmp, "video.mp4");
-        long videoBytes = api.downloadTo("/webvideo/" + id, tmpVideo, 96L * 1024L * 1024L);
-        if (videoBytes <= 0) throw new Exception("empty mp4");
-        if (withPoster) {
-            byte[] poster = api.getBytes("/poster/" + id);
-            if (poster.length <= 0 || poster.length > 8L * 1024L * 1024L) throw new Exception("bad poster size");
-            writeBytes(new File(tmp, "poster.jpg"), poster);
+        logEvent("HLS_PREPARE", "id=" + id);
+        JSONObject desc = api.waitHls(id);
+        String baseUrl = desc.getString("base_url");
+        JSONArray files = desc.getJSONArray("files");
+        int written = 0;
+        for (int n=0; n<files.length(); n++) {
+            JSONObject fdesc = files.getJSONObject(n);
+            String name = fdesc.getString("name");
+            if (!withPoster && "poster.jpg".equals(name)) continue;
+            if (!name.matches("(?:index\\.m3u8|poster\\.jpg|seg_\\d{5}\\.ts)")) throw new Exception("unsafe hls file " + name);
+            byte[] data = api.getBytes(baseUrl + name);
+            long expected = fdesc.optLong("bytes", -1);
+            String expectedSha = fdesc.optString("sha256", "");
+            if (expected >= 0 && data.length != expected) throw new Exception("size mismatch " + name);
+            if (!expectedSha.isEmpty() && !expectedSha.equals(sha256(data))) throw new Exception("sha mismatch " + name);
+            writeBytes(new File(tmp, name), data);
+            written++;
+            if (root == warmRoot) setWarmProgress("DOWNLOADING", id, written, Math.max(1, files.length()), "");
         }
+        if (!new File(tmp, "index.m3u8").isFile()) throw new Exception("missing playlist");
         writeBytes(new File(tmp, ".complete"), Long.toString(System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8));
-
         deleteTree(dest);
         if (!tmp.renameTo(dest)) throw new Exception("rename failed");
         if (root == transientRoot) {
@@ -353,26 +349,7 @@ public class MainActivity extends Activity {
             cleanupTransient();
         }
         failedVideos.remove(id);
-        logEvent("MP4_LOCAL_READY", "id=" + id + " pool=" + (root == warmRoot ? "warm" : "transient") + " bytes=" + treeSize(dest));
-    }
-
-    private void cleanupLegacySegmentCaches(File root) {
-        File[] dirs = root.listFiles();
-        if (dirs == null) return;
-        int removed = 0;
-        long bytes = 0;
-        for (File d : dirs) {
-            if (!d.isDirectory()) continue;
-            File complete = new File(d, ".complete");
-            File mp4 = new File(d, "video.mp4");
-            File oldHls = new File(d, "index.m3u8");
-            if (complete.isFile() && oldHls.isFile() && !mp4.isFile()) {
-                bytes += treeSize(d);
-                deleteTree(d);
-                removed++;
-            }
-        }
-        if (removed > 0) logEvent("LEGACY_HLS_CACHE_REMOVED", "dirs=" + removed + " bytes=" + bytes);
+        logEvent("HLS_LOCAL_READY", "id=" + id + " pool=" + (root == warmRoot ? "warm" : "transient") + " bytes=" + treeSize(dest));
     }
 
     private List<String> readyWarmIds() {
@@ -383,7 +360,7 @@ public class MainActivity extends Activity {
             for (File d : dirs) {
                 if (d.isDirectory() && d.getName().matches("\\d+") &&
                         new File(d, ".complete").isFile() &&
-                        new File(d, "video.mp4").isFile() &&
+                        new File(d, "index.m3u8").isFile() &&
                         new File(d, "poster.jpg").isFile()) candidates.add(d);
             }
             candidates.sort((a,b) -> Long.compare(b.lastModified(), a.lastModified()));
@@ -424,13 +401,13 @@ public class MainActivity extends Activity {
 
     private boolean isWarmReady(String id) {
         File d = new File(warmRoot, id);
-        return new File(d, ".complete").isFile() && new File(d, "video.mp4").isFile();
+        return new File(d, ".complete").isFile() && new File(d, "index.m3u8").isFile();
     }
 
     private boolean isTransientReady(String id) {
         File d = new File(transientRoot, id);
         File c = new File(d, ".complete");
-        if (!c.isFile() || !new File(d,"video.mp4").isFile()) return false;
+        if (!c.isFile() || !new File(d,"index.m3u8").isFile()) return false;
         if (System.currentTimeMillis() - c.lastModified() > TRANSIENT_TTL_MS) {
             deleteTree(d);
             return false;
@@ -516,7 +493,6 @@ public class MainActivity extends Activity {
         if (n.endsWith(".css")) return "text/css";
         if (n.endsWith(".m3u8")) return "application/vnd.apple.mpegurl";
         if (n.endsWith(".ts")) return "video/mp2t";
-        if (n.endsWith(".mp4")) return "video/mp4";
         if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
         return "application/octet-stream";
     }
@@ -600,49 +576,6 @@ public class MainActivity extends Activity {
             } finally { c.disconnect(); }
         }
 
-        long downloadTo(String path, File target, long maxBytes) throws Exception {
-            if (path == null || !path.startsWith("/")) throw new Exception("unsafe path");
-            if (cookie == null) enroll();
-            HttpURLConnection c = open(BASE + path, "GET");
-            c.setRequestProperty("Cookie", cookie);
-            c.setInstanceFollowRedirects(false);
-            int code = c.getResponseCode();
-            if (code == 302 || code == 303 || code == 401) {
-                drain(c); c.disconnect(); cookie = null; enroll(); return downloadTo(path, target, maxBytes);
-            }
-            if (code < 200 || code >= 300) {
-                drain(c); c.disconnect(); throw new Exception("HTTP " + code + " " + path);
-            }
-            long declared = c.getContentLengthLong();
-            if (declared > maxBytes) {
-                drain(c); c.disconnect(); throw new Exception("mp4 over limit " + declared);
-            }
-            File parent = target.getParentFile();
-            if (parent != null) parent.mkdirs();
-            File part = new File(target.getAbsolutePath() + ".part");
-            long total = 0;
-            try (InputStream in=c.getInputStream(); FileOutputStream out=new FileOutputStream(part)) {
-                byte[] b=new byte[128*1024]; int n;
-                while((n=in.read(b))!=-1) {
-                    total += n;
-                    if (total > maxBytes) throw new Exception("mp4 over limit " + total);
-                    out.write(b,0,n);
-                    // Cheap TV flash can periodically block video decode when a large
-                    // background file is written at full speed. Keep one prefetch worker
-                    // and heavily yield I/O while a video is actually on screen.
-                    if (playbackActive) Thread.sleep(90L);
-                }
-                out.getFD().sync();
-            } finally {
-                c.disconnect();
-            }
-            if (total <= 0) { part.delete(); throw new Exception("empty download"); }
-            if (target.exists()) target.delete();
-            if (!part.renameTo(target)) { part.delete(); throw new Exception("rename failed"); }
-            logEvent("MP4_DOWNLOAD_DONE", path + " bytes=" + total);
-            return total;
-        }
-
         void played(JSONArray ids) throws Exception {
             post("/living/api/played", new JSONObject().put("media_ids", ids));
         }
@@ -680,7 +613,7 @@ public class MainActivity extends Activity {
         c.setReadTimeout(45000);
         c.setRequestMethod(method);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "BambiniLiving/6.9");
+        c.setRequestProperty("User-Agent", "BambiniLiving/7.0");
         return c;
     }
 
@@ -766,25 +699,31 @@ public class MainActivity extends Activity {
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 
-    private void pauseHostPlayback(String reason) {
-        if (web == null || hostPaused) return;
-        hostPaused = true;
-        logEvent("APP_BACKGROUND_PAUSE", reason);
+    private void pauseMediaForHost(String reason) {
+        if (web == null) return;
+        logEvent("HOST_PAUSE_ONESHOT", reason);
         try {
-            web.evaluateJavascript("window.bambiniHostPause&&window.bambiniHostPause()", null);
+            web.evaluateJavascript(
+                    "(function(){document.querySelectorAll('video,audio').forEach(function(v){" +
+                    "v.dataset.bambiniHostWasPlaying=(!v.paused&&!v.ended)?'1':'0';" +
+                    "try{v.pause()}catch(e){}});return true})()", null);
         } catch (Exception ignored) {}
         web.onPause();
     }
 
-    private void resumeHostPlayback(String reason) {
-        if (web == null || !hostPaused || isFinishing() || exiting) return;
-        hostPaused = false;
+    private void resumeMediaForHost(String reason) {
+        if (web == null || isFinishing()) return;
         web.onResume();
-        try {
-            web.evaluateJavascript("window.bambiniHostResume&&window.bambiniHostResume()", null);
-        } catch (Exception ignored) {}
-        logEvent("APP_FOREGROUND_RESUME", reason);
-        immersive();
+        logEvent("HOST_RESUME_ONESHOT", reason);
+        main.postDelayed(() -> {
+            if (web == null || isFinishing()) return;
+            try {
+                web.evaluateJavascript(
+                        "(function(){document.querySelectorAll('video,audio').forEach(function(v){" +
+                        "if(v.dataset.bambiniHostWasPlaying==='1'){v.dataset.bambiniHostWasPlaying='0';" +
+                        "try{var p=v.play();if(p&&p.catch)p.catch(function(){})}catch(e){}}});return true})()", null);
+            } catch (Exception ignored) {}
+        }, 120);
     }
 
     private void handleBackExit() {
@@ -793,75 +732,49 @@ public class MainActivity extends Activity {
         if (now - lastBackAt > BACK_DOUBLE_MS) {
             lastBackAt = now;
             Toast.makeText(this, "Нажмите Назад ещё раз для выхода", Toast.LENGTH_SHORT).show();
-            logEvent("BACK_ARMED", "waiting second press");
             return;
         }
         lastBackAt = 0L;
-        pauseHostPlayback("exit-confirm");
+        pauseMediaForHost("exit-confirm");
         exitDialog = new AlertDialog.Builder(this)
                 .setTitle("Закрыть Bambini?")
                 .setMessage("Слайд-шоу и звук будут остановлены.")
                 .setPositiveButton("Да", (dialog, which) -> {
-                    logEvent("APP_EXIT_CONFIRMED", "yes");
-                    exiting = true;
                     if (web != null) {
-                        try { web.evaluateJavascript("window.bambiniHostStop&&window.bambiniHostStop()", null); } catch (Exception ignored) {}
-                        web.stopLoading();
+                        try {
+                            web.evaluateJavascript(
+                                    "document.querySelectorAll('video,audio').forEach(function(v){try{v.pause();v.muted=true}catch(e){}})", null);
+                        } catch (Exception ignored) {}
                     }
                     finishAndRemoveTask();
                 })
-                .setNegativeButton("Нет", (dialog, which) -> {
-                    logEvent("APP_EXIT_CONFIRMED", "no");
-                    resumeHostPlayback("exit-cancel");
-                })
-                .setOnCancelListener(dialog -> resumeHostPlayback("exit-cancel"))
-                .setOnDismissListener(dialog -> {
-                    exitDialog = null;
-                    if (!isFinishing()) resumeHostPlayback("exit-dismiss");
-                })
+                .setNegativeButton("Нет", (dialog, which) -> resumeMediaForHost("exit-cancel"))
+                .setOnCancelListener(dialog -> resumeMediaForHost("exit-cancel"))
                 .create();
         exitDialog.setOnShowListener(dialog -> exitDialog.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus());
+        exitDialog.setOnDismissListener(dialog -> exitDialog = null);
         exitDialog.show();
     }
 
-    @Override public boolean dispatchKeyEvent(KeyEvent event) {
-        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
-            if (event.getAction() == KeyEvent.ACTION_UP) handleBackExit();
-            return true;
-        }
-        return super.dispatchKeyEvent(event);
-    }
+    @Override public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);if(focus)immersive();}
+    @Override public void onBackPressed(){handleBackExit();}
 
-    @Override public void onBackPressed(){ handleBackExit(); }
-
-    @Override protected void onPause() {
-        pauseHostPlayback("activity-pause");
-        super.onPause();
-    }
-
-    @Override protected void onResume() {
-        super.onResume();
-        main.postDelayed(() -> resumeHostPlayback("activity-resume"), 80);
-    }
-
-    @Override protected void onStop() {
-        pauseHostPlayback("activity-stop");
+    @Override protected void onStop(){
+        pauseMediaForHost("activity-stop");
         super.onStop();
     }
 
-    @Override public void onWindowFocusChanged(boolean focus){
-        super.onWindowFocusChanged(focus);
-        if(focus) immersive();
+    @Override protected void onResume(){
+        super.onResume();
+        resumeMediaForHost("activity-resume");
+        immersive();
     }
 
     @Override protected void onDestroy(){
         logEvent("APP_DESTROY", BUILD);
         control.shutdownNow();prefetch.shutdownNow();
         if(exitDialog!=null){try{exitDialog.dismiss();}catch(Exception ignored){}exitDialog=null;}
-        if(web!=null){
-            try{web.evaluateJavascript("window.bambiniHostStop&&window.bambiniHostStop()",null);}catch(Exception ignored){}
-            web.loadUrl("about:blank");web.destroy();
-        }
+        if(web!=null){web.loadUrl("about:blank");web.destroy();web=null;}
         super.onDestroy();
     }
 }
