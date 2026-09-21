@@ -23,7 +23,7 @@ jobs:
             --socket=/tmp/tailscaled.sock \
             >/tmp/tailscaled.log 2>&1 &
           sleep 3
-          nohup /tmp/ts/tailscale --socket=/tmp/tailscaled.sock up \
+          nohup sudo /tmp/ts/tailscale --socket=/tmp/tailscaled.sock up \
             --hostname=github-bambini-photo-patch \
             --accept-dns=false \
             >/tmp/tailscale-up.log 2>&1 &
@@ -42,8 +42,8 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 90); do
-            if /tmp/ts/tailscale --socket=/tmp/tailscaled.sock status --json 2>/dev/null | grep -q '"BackendState": "Running"'; then
-              /tmp/ts/tailscale --socket=/tmp/tailscaled.sock status
+            if sudo /tmp/ts/tailscale --socket=/tmp/tailscaled.sock status --json 2>/dev/null | grep -q '"BackendState": "Running"'; then
+              sudo /tmp/ts/tailscale --socket=/tmp/tailscaled.sock status
               exit 0
             fi
             sleep 10
@@ -55,7 +55,7 @@ jobs:
       - name: Patch Bambini photo delivery on production VPS
         run: |
           set -euo pipefail
-          /tmp/ts/tailscale --socket=/tmp/tailscaled.sock ssh root@100.76.34.91 'bash -s' <<'REMOTE'
+          sudo /tmp/ts/tailscale --socket=/tmp/tailscaled.sock ssh root@100.76.34.91 'bash -s' <<'REMOTE'
           set -euo pipefail
           cd /root/tg_photo_archive
           stamp=$(date -u +%Y%m%dT%H%M%SZ)
