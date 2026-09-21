@@ -87,7 +87,7 @@ function mediaPath(p,id){
  return '/media/poster/'+id;
 }
 function thumbPath(id){return '/media/thumb/'+id}
-function hlsPath(id){return '/stream/'+id+'/index.m3u8'}
+function videoPath(id){return '/stream/'+id+'/video.mp4'}
 function dateText(x){if(/^\d{4}-\d{2}-\d{2}$/.test(x||'')){const a=x.split('-');return a[2]+'.'+a[1]+'.'+a[0]}return x||''}
 function videoIds(scene){return scene.items.filter(x=>x.type==='video').map(x=>String(x.id))}
 
@@ -213,7 +213,7 @@ function fallbackPoster(panelData,ms=4500){
 }
 
 async function playHls(item,panelData,onReveal){
- diag('VIDEO_WAIT',{id:item.id});
+ diag('VIDEO_WAIT',{id:item.id,transport:'local-mp4'});
  const initialReady=(()=>{try{return App.videoState(String(item.id))==='READY'}catch(_){return false}})();
  if(!initialReady)diag('VIDEO_POSTER_BUFFERING',{id:item.id});
  return new Promise(resolve=>{
@@ -230,11 +230,11 @@ async function playHls(item,panelData,onReveal){
   v.muted=false;
   panel.insertBefore(v,panel.querySelector('.meta'));
 
-  let hls=null,finished=false,started=false,beat=null,startTimer=null,hardTimer=null,promoted=false;
+  let finished=false,started=false,beat=null,startTimer=null,hardTimer=null,promoted=false,lastBeat=-1;
   const cleanup=()=>{
    clearTimeout(startTimer);clearTimeout(hardTimer);clearInterval(beat);
-   if(hls){try{hls.destroy()}catch(_){}hls=null}
    try{v.pause()}catch(_){}
+   try{v.removeAttribute('src');v.load()}catch(_){}
    try{v.remove()}catch(_){}
    if(leased){leased=false;try{App.releaseVideo(String(item.id))}catch(_){}}
   };
@@ -257,8 +257,13 @@ async function playHls(item,panelData,onReveal){
   const reveal=()=>{
    if(started)return;
    started=true;
-   diag('VIDEO_PLAYING',{id:item.id,readyState:v.readyState,width:v.videoWidth,height:v.videoHeight,time:v.currentTime,muted:v.muted,volume:v.volume});
-   beat=setInterval(()=>diag('VIDEO_HEARTBEAT',{id:item.id,time:Number(v.currentTime.toFixed(2)),readyState:v.readyState,paused:v.paused}),2000);
+   diag('VIDEO_PLAYING',{id:item.id,transport:'local-mp4',readyState:v.readyState,width:v.videoWidth,height:v.videoHeight,time:v.currentTime,muted:v.muted,volume:v.volume});
+   beat=setInterval(()=>{
+    const now=Number(v.currentTime.toFixed(3));
+    const delta=lastBeat<0?null:Number((now-lastBeat).toFixed(3));
+    diag('VIDEO_HEARTBEAT',{id:item.id,time:now,delta,readyState:v.readyState,paused:v.paused});
+    lastBeat=now;
+   },1000);
    if(onReveal)try{onReveal()}catch(_){}
    v.classList.add('playing');
    requestAnimationFrame(()=>requestAnimationFrame(()=>{
@@ -268,34 +273,22 @@ async function playHls(item,panelData,onReveal){
   };
 
   const startSource=()=>{
-  const source=hlsPath(item.id);
-  if(Hls.isSupported()){
-   hls=new Hls({maxBufferLength:45,maxMaxBufferLength:75,backBufferLength:5,enableWorker:true,startFragPrefetch:true,fragLoadingTimeOut:30000});
-   hls.loadSource(source);
-   hls.attachMedia(v);
-   hls.on(Hls.Events.MANIFEST_PARSED,(_,d)=>{
-    diag('HLS_MANIFEST',{id:item.id,levels:d.levels?.length||0});
-    if(hostSuspended){v.dataset.bambiniPendingPlay='1';diag('HOST_PLAY_DEFERRED',{id:item.id});return}
-    v.play().catch(e=>{diag('VIDEO_PLAY_REJECT',{id:item.id,error:String(e)});finish(false)});
-   });
-   hls.on(Hls.Events.ERROR,(_,d)=>{diag('HLS_ERROR',{id:item.id,type:d.type,details:d.details,fatal:d.fatal,response:d.response?.code});if(d.fatal)finish(started)});
-  }else{
+   const source=videoPath(item.id);
    v.src=source;
+   v.addEventListener('loadedmetadata',()=>diag('MP4_METADATA',{id:item.id,duration:v.duration,width:v.videoWidth,height:v.videoHeight}));
+   v.addEventListener('loadeddata',()=>diag('VIDEO_LOADEDDATA',{id:item.id,readyState:v.readyState}));
+   v.addEventListener('canplay',()=>diag('VIDEO_CANPLAY',{id:item.id,readyState:v.readyState}));
+   v.addEventListener('playing',reveal);
+   v.addEventListener('waiting',()=>diag('VIDEO_WAITING',{id:item.id,time:v.currentTime,readyState:v.readyState,transport:'local-mp4'}));
+   v.addEventListener('stalled',()=>diag('VIDEO_STALLED',{id:item.id,time:v.currentTime,readyState:v.readyState,transport:'local-mp4'}));
+   v.addEventListener('ended',()=>{diag('VIDEO_ENDED',{id:item.id,time:v.currentTime});finish(true)});
+   v.addEventListener('error',()=>{diag('VIDEO_ELEMENT_ERROR',{id:item.id,code:v.error?.code,message:v.error?.message,transport:'local-mp4'});finish(started)});
    if(hostSuspended){v.dataset.bambiniPendingPlay='1';diag('HOST_PLAY_DEFERRED',{id:item.id})}
    else v.play().catch(e=>{diag('VIDEO_NATIVE_PLAY_REJECT',{id:item.id,error:String(e)});finish(false)});
-  }
-
-  v.addEventListener('loadeddata',()=>diag('VIDEO_LOADEDDATA',{id:item.id,readyState:v.readyState}));
-  v.addEventListener('canplay',()=>diag('VIDEO_CANPLAY',{id:item.id,readyState:v.readyState}));
-  v.addEventListener('playing',reveal);
-  v.addEventListener('waiting',()=>diag('VIDEO_WAITING',{id:item.id,time:v.currentTime,readyState:v.readyState}));
-  v.addEventListener('stalled',()=>diag('VIDEO_STALLED',{id:item.id,time:v.currentTime,readyState:v.readyState}));
-  v.addEventListener('ended',()=>{diag('VIDEO_ENDED',{id:item.id,time:v.currentTime});finish(true)});
-  v.addEventListener('error',()=>{diag('VIDEO_ELEMENT_ERROR',{id:item.id,code:v.error?.code,message:v.error?.message});finish(started)});
-
-  startTimer=setTimeout(()=>{if(!started){diag('VIDEO_START_TIMEOUT',{id:item.id});finish(false)}},12000);
-  hardTimer=setTimeout(()=>{diag('VIDEO_HARD_TIMEOUT',{id:item.id,time:v.currentTime,started});finish(started)},((Math.max(8,item.limit||80))+35)*1000);
+   startTimer=setTimeout(()=>{if(!started){diag('VIDEO_START_TIMEOUT',{id:item.id,transport:'local-mp4'});finish(false)}},12000);
+   hardTimer=setTimeout(()=>{diag('VIDEO_HARD_TIMEOUT',{id:item.id,time:v.currentTime,started});finish(started)},((Math.max(8,item.limit||80))+35)*1000);
   };
+
   if(initialReady)startSource();
   else waitReady(item.id,12000).then(ok=>{
    if(finished)return;
