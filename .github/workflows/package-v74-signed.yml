@@ -1,0 +1,23 @@
+name: Package signed Bambini v7.4 artifact
+on:
+  push:
+    paths:
+      - '.github/workflows/package-v74-signed.yml'
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch production-signed APK
+        run: |
+          set -euo pipefail
+          curl -fL --retry 4 --retry-delay 2 \
+            https://github.com/anpavel84-afk/bambini-apk-transfer/releases/download/v7.4.0/Bambini-Living-v7.4-remote-ui-accordion.apk \
+            -o Bambini-Living-v7.4-remote-ui-accordion.apk
+          echo "52d5405c77240789faf41db1647eee59470d7b83c641cfadf03ca57ae7785e20  Bambini-Living-v7.4-remote-ui-accordion.apk" | sha256sum -c -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bambini-Living-v7.4-production-signed
+          path: Bambini-Living-v7.4-remote-ui-accordion.apk
+          retention-days: 7
