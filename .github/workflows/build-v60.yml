@@ -1,4 +1,4 @@
-name: Build Bambini v7.0 v6.6 playback minimal exit
+name: Build Bambini v7.4 remote UI accordion
 on:
   push:
     paths:
@@ -27,15 +27,15 @@ jobs:
           wget -q https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
           unzip -q gradle-8.14.3-bin.zip
           ./gradle-8.14.3/bin/gradle :app:assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v7.0-v66-playback-minimal-exit.apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../Bambini-Living-v7.4-remote-ui-accordion.apk
       - name: Publish APK
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add Bambini-Living-v7.0-v66-playback-minimal-exit.apk
-          git commit -m "Publish Bambini Living v7.0 v6.6 playback minimal exit APK" || exit 0
+          git add Bambini-Living-v7.4-remote-ui-accordion.apk
+          git commit -m "Publish Bambini Living v7.4 remote UI accordion APK" || exit 0
           git push
       - uses: actions/upload-artifact@v4
         with:
-          name: Bambini-Living-v7.0-v66-playback-minimal-exit
-          path: Bambini-Living-v7.0-v66-playback-minimal-exit.apk
+          name: Bambini-Living-v7.4-remote-ui-accordion
+          path: Bambini-Living-v7.4-remote-ui-accordion.apk

@@ -1,4 +1,4 @@
 plugins { id 'com.android.application' }
 android { namespace 'ru.anpavel.bambiniliving'; compileSdk 35
- defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 25; versionName '7.0-v66-playback-minimal-exit' }
+ defaultConfig { applicationId 'ru.anpavel.bambiniliving'; minSdk 23; targetSdk 35; versionCode 29; versionName '7.4-remote-ui-accordion' }
 }

@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.View;
+import android.view.KeyEvent;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ConsoleMessage;
@@ -43,10 +44,12 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public class MainActivity extends Activity {
     private static final String TAG = "BambiniQA";
-    private static final String BUILD = "7.0-v66-playback-minimal-exit";
+    private static final String BUILD = "7.4-remote-ui-accordion";
     private static final String BASE = "https://bambini.anpavel.ru";
     private static final String APP_KEY = "_SEs08BNhi4G1ZRKuYI_" + "mimSSeEtOL8WiG1g0qe_" + "5qgoLJVxTEb7Z2_geKZl-Vxn";
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
@@ -54,6 +57,7 @@ public class MainActivity extends Activity {
     private static final long TRANSIENT_TTL_MS = 10L * 60L * 1000L;
     private static final long TRANSIENT_MAX_BYTES = 300L * 1024L * 1024L;
     private static final long BACK_DOUBLE_MS = 2200L;
+    private static final long UI_POLL_MS = 4L * 60L * 60L * 1000L;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService control = Executors.newSingleThreadExecutor();
@@ -62,9 +66,15 @@ public class MainActivity extends Activity {
     private WebView web;
     private File warmRoot;
     private File transientRoot;
+    private File uiRoot;
+    private File uiCurrent;
+    private File uiPrevious;
+    private volatile String uiConfigJson = "{}";
+    private volatile boolean uiRollbackInProgress = false;
     private Api api;
     private long lastBackAt = 0L;
     private AlertDialog exitDialog;
+    private boolean exiting = false;
 
     private volatile String warmStage = "START";
     private volatile String warmId = "";
@@ -81,8 +91,15 @@ public class MainActivity extends Activity {
 
         warmRoot = new File(getFilesDir(), "bambini-warm-v2");
         transientRoot = new File(getCacheDir(), "bambini-stream-v2");
+        uiRoot = new File(getFilesDir(), "bambini-ui-v1");
+        uiCurrent = new File(uiRoot, "current");
+        uiPrevious = new File(uiRoot, "previous");
         warmRoot.mkdirs();
         transientRoot.mkdirs();
+        uiRoot.mkdirs();
+        recoverPendingUi();
+        uiConfigJson = readUiConfig(uiCurrent);
+        if (uiConfigJson == null) uiConfigJson = getPreferences(MODE_PRIVATE).getString("ui_config_json", "{}");
         api = new Api();
         logEvent("APP_CREATE", "build=" + BUILD + " warm=" + warmRoot + " transient=" + transientRoot);
 
@@ -110,14 +127,18 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new LocalClient());
         setContentView(web);
         immersive();
-        logEvent("WEB_LOAD", APP_ORIGIN + "/assets/player.html");
-        web.loadUrl(APP_ORIGIN + "/assets/player.html");
+
+        // Start immediately from the last validated UI (or bundled fallback).
+        // Network synchronization must never delay offline startup.
+        loadUiShell();
 
         control.execute(() -> {
+            boolean uiChanged = false;
             try {
                 logEvent("CONTROL_START", "enroll");
                 api.enroll();
                 logEvent("CONTROL_ENROLLED", "ok");
+                uiChanged = syncUiBundle();
                 cleanupTransient();
                 List<String> ready = readyWarmIds();
                 if (ready.isEmpty()) {
@@ -130,6 +151,9 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 logEvent("CONTROL_ERROR", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
                 setWarmProgress("ERROR", "", 0, 1, e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
+            } finally {
+                if (uiChanged) main.post(this::loadUiShell);
+                main.post(this::scheduleUiPoll);
             }
         });
     }
@@ -157,6 +181,12 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface public boolean isWarm(String id) { return isWarmReady(id); }
+
+        @JavascriptInterface public String uiConfig() { return uiConfigJson == null ? "{}" : uiConfigJson; }
+
+        @JavascriptInterface public void uiReady(String version) {
+            control.execute(() -> markUiReady(version));
+        }
 
         @JavascriptInterface public String queue() {
             try {
@@ -449,6 +479,10 @@ public class MainActivity extends Activity {
                 String name = path.substring("/assets/".length());
                 return response(name, getAssets().open(name));
             }
+            if (path.startsWith("/ui/")) {
+                File f = safeFile(uiCurrent, path.substring("/ui/".length()));
+                return f != null && f.isFile() ? response(f.getName(), new FileInputStream(f)) : notFound();
+            }
             if (path.startsWith("/warm/")) {
                 File f = safeFile(warmRoot, path.substring(6));
                 return f != null && f.isFile() ? response(f.getName(), new FileInputStream(f)) : notFound();
@@ -497,6 +531,185 @@ public class MainActivity extends Activity {
         return "application/octet-stream";
     }
 
+    private void loadUiShell() {
+        String url = validUiDir(uiCurrent) ? APP_ORIGIN + "/ui/player.html" : APP_ORIGIN + "/assets/player.html";
+        logEvent("WEB_LOAD", url + " config=" + safeLog(uiConfigJson));
+        web.loadUrl(url);
+        armUiHealthCheck();
+    }
+
+    private void armUiHealthCheck() {
+        File pending = new File(uiCurrent, ".pending");
+        if (!pending.isFile() || uiRollbackInProgress) return;
+        final int version = readUiVersion(uiCurrent);
+        main.postDelayed(() -> {
+            if (exiting || uiRollbackInProgress || !new File(uiCurrent, ".pending").isFile()) return;
+            control.execute(() -> rollbackUiNow("health-timeout-v" + version));
+        }, 12000L);
+    }
+
+    private void rollbackUiNow(String reason) {
+        if (uiRollbackInProgress) return;
+        uiRollbackInProgress = true;
+        try {
+            logEvent("UI_ROLLBACK", reason);
+            deleteTree(uiCurrent);
+            if (validUiDir(uiPrevious) && uiPrevious.renameTo(uiCurrent)) {
+                logEvent("UI_ROLLBACK", "restored previous version=" + readUiVersion(uiCurrent));
+            } else {
+                deleteTree(uiPrevious);
+                logEvent("UI_ROLLBACK", "factory fallback");
+            }
+            String restored = readUiConfig(uiCurrent);
+            uiConfigJson = restored == null ? "{}" : restored;
+            getPreferences(MODE_PRIVATE).edit().putString("ui_config_json", uiConfigJson).apply();
+            main.post(this::loadUiShell);
+        } finally {
+            uiRollbackInProgress = false;
+        }
+    }
+
+    private void recoverPendingUi() {
+        File pending = new File(uiCurrent, ".pending");
+        if (!pending.isFile()) return;
+        logEvent("UI_RECOVERY", "pending current detected");
+        deleteTree(uiCurrent);
+        if (validUiDir(uiPrevious) && uiPrevious.renameTo(uiCurrent)) {
+            logEvent("UI_ROLLBACK", "restored previous");
+        } else {
+            deleteTree(uiPrevious);
+            logEvent("UI_ROLLBACK", "factory fallback");
+        }
+    }
+
+    private boolean syncUiBundle() throws Exception {
+        JSONObject manifest = api.uiManifest();
+        int version = manifest.optInt("version", 0);
+        JSONObject config = manifest.optJSONObject("config");
+        if (config == null) config = new JSONObject();
+        config.put("uiVersion", version);
+        String nextConfig = config.toString();
+
+        int currentVersion = readUiVersion(uiCurrent);
+        if (version <= 0) throw new Exception("invalid ui version");
+
+        if (version == currentVersion && validUiDir(uiCurrent)) {
+            boolean configChanged = !nextConfig.equals(uiConfigJson);
+            if (configChanged) {
+                uiConfigJson = nextConfig;
+                writeText(new File(uiCurrent, ".config.json"), uiConfigJson);
+                getPreferences(MODE_PRIVATE).edit().putString("ui_config_json", uiConfigJson).apply();
+            }
+            logEvent("UI_SYNC", "current=" + currentVersion + " remote=" + version + " no-download");
+            return configChanged;
+        }
+
+        String path = manifest.optString("bundle_path", "");
+        String expected = manifest.optString("sha256", "").toLowerCase();
+        if (!path.startsWith("/living/api/ui/bundle/") || !expected.matches("[0-9a-f]{64}"))
+            throw new Exception("invalid ui manifest");
+
+        byte[] zip = api.getBytes(path);
+        if (zip.length <= 0 || zip.length > 2 * 1024 * 1024) throw new Exception("ui bundle size");
+        String actual = sha256(zip);
+        if (!expected.equals(actual)) throw new Exception("ui sha mismatch");
+
+        File stage = new File(uiRoot, "stage");
+        deleteTree(stage); stage.mkdirs();
+        unzipUi(zip, stage);
+        if (!validUiDir(stage)) { deleteTree(stage); throw new Exception("ui bundle incomplete"); }
+        writeText(new File(stage, ".version"), Integer.toString(version));
+        writeText(new File(stage, ".config.json"), nextConfig);
+        writeText(new File(stage, ".pending"), actual);
+
+        deleteTree(uiPrevious);
+        if (uiCurrent.exists() && !uiCurrent.renameTo(uiPrevious)) {
+            deleteTree(stage);
+            throw new Exception("ui rotate current failed");
+        }
+        if (!stage.renameTo(uiCurrent)) {
+            if (uiPrevious.exists()) uiPrevious.renameTo(uiCurrent);
+            throw new Exception("ui activate failed");
+        }
+
+        uiConfigJson = nextConfig;
+        getPreferences(MODE_PRIVATE).edit().putString("ui_config_json", uiConfigJson).apply();
+        logEvent("UI_SYNC", "activated version=" + version + " sha=" + actual.substring(0,12));
+        return true;
+    }
+
+    private void scheduleUiPoll() {
+        main.postDelayed(() -> control.execute(() -> {
+            try {
+                boolean changed = syncUiBundle();
+                if (changed) main.post(this::loadUiShell);
+            } catch (Exception e) {
+                logEvent("UI_POLL_ERROR", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
+            } finally {
+                if (!exiting) main.post(this::scheduleUiPoll);
+            }
+        }), UI_POLL_MS);
+    }
+
+    private void markUiReady(String version) {
+        try {
+            int local = readUiVersion(uiCurrent);
+            if (local > 0 && !Integer.toString(local).equals(version)) {
+                logEvent("UI_READY_REJECT", "reported=" + version + " local=" + local);
+                return;
+            }
+            File pending = new File(uiCurrent, ".pending");
+            if (pending.exists()) pending.delete();
+            logEvent("UI_READY", "version=" + version + " local=" + local);
+        } catch (Exception e) {
+            logEvent("UI_READY_ERROR", e.getClass().getSimpleName());
+        }
+    }
+
+    private static String readUiConfig(File d) {
+        try {
+            File f = new File(d, ".config.json");
+            if (!f.isFile()) return null;
+            return readText(new FileInputStream(f)).trim();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static boolean validUiDir(File d) {
+        return d != null && new File(d,"player.html").isFile() && new File(d,"player.css").isFile() && new File(d,"player.js").isFile();
+    }
+
+    private static int readUiVersion(File d) {
+        try {
+            File f=new File(d,".version");
+            if(!f.isFile()) return 0;
+            return Integer.parseInt(readText(new FileInputStream(f)).trim());
+        } catch(Exception e) { return 0; }
+    }
+
+    private static void writeText(File f, String text) throws Exception {
+        writeBytes(f, text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void unzipUi(byte[] zip, File out) throws Exception {
+        try (ZipInputStream zin = new ZipInputStream(new ByteArrayInputStream(zip))) {
+            ZipEntry e;
+            byte[] buf = new byte[64*1024];
+            while ((e = zin.getNextEntry()) != null) {
+                String name = e.getName().replace('\\','/');
+                if (name.startsWith("/") || name.contains("../")) throw new Exception("unsafe ui zip");
+                File f = safeFile(out, name);
+                if (f == null) throw new Exception("unsafe ui path");
+                if (e.isDirectory()) { f.mkdirs(); continue; }
+                File parent=f.getParentFile(); if(parent!=null)parent.mkdirs();
+                try(FileOutputStream os=new FileOutputStream(f)) {
+                    int n; while((n=zin.read(buf))!=-1)os.write(buf,0,n);
+                }
+            }
+        }
+    }
+
     private void cleanupTransient() {
         long cutoff = System.currentTimeMillis() - TRANSIENT_TTL_MS;
         File[] dirs = transientRoot.listFiles();
@@ -540,6 +753,10 @@ public class MainActivity extends Activity {
 
         JSONObject queue() throws Exception {
             return post("/living/api/queue", new JSONObject());
+        }
+
+        JSONObject uiManifest() throws Exception {
+            return post("/living/api/ui", new JSONObject());
         }
 
         JSONObject waitHls(String id) throws Exception {
@@ -613,7 +830,7 @@ public class MainActivity extends Activity {
         c.setReadTimeout(45000);
         c.setRequestMethod(method);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "BambiniLiving/7.0");
+        c.setRequestProperty("User-Agent", "BambiniLiving/7.4");
         return c;
     }
 
@@ -699,82 +916,70 @@ public class MainActivity extends Activity {
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 
-    private void pauseMediaForHost(String reason) {
-        if (web == null) return;
-        logEvent("HOST_PAUSE_ONESHOT", reason);
-        try {
-            web.evaluateJavascript(
-                    "(function(){document.querySelectorAll('video,audio').forEach(function(v){" +
-                    "v.dataset.bambiniHostWasPlaying=(!v.paused&&!v.ended)?'1':'0';" +
-                    "try{v.pause()}catch(e){}});return true})()", null);
-        } catch (Exception ignored) {}
-        web.onPause();
-    }
-
-    private void resumeMediaForHost(String reason) {
-        if (web == null || isFinishing()) return;
-        web.onResume();
-        logEvent("HOST_RESUME_ONESHOT", reason);
-        main.postDelayed(() -> {
-            if (web == null || isFinishing()) return;
-            try {
-                web.evaluateJavascript(
-                        "(function(){document.querySelectorAll('video,audio').forEach(function(v){" +
-                        "if(v.dataset.bambiniHostWasPlaying==='1'){v.dataset.bambiniHostWasPlaying='0';" +
-                        "try{var p=v.play();if(p&&p.catch)p.catch(function(){})}catch(e){}}});return true})()", null);
-            } catch (Exception ignored) {}
-        }, 120);
-    }
-
     private void handleBackExit() {
         long now = System.currentTimeMillis();
         if (exitDialog != null && exitDialog.isShowing()) return;
         if (now - lastBackAt > BACK_DOUBLE_MS) {
             lastBackAt = now;
-            Toast.makeText(this, "Нажмите Назад ещё раз для выхода", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "\u041d\u0430\u0436\u043c\u0438\u0442\u0435 \u041d\u0430\u0437\u0430\u0434 \u0435\u0449\u0451 \u0440\u0430\u0437 \u0434\u043b\u044f \u0432\u044b\u0445\u043e\u0434\u0430", Toast.LENGTH_SHORT).show();
+            logEvent("BACK_ARMED", "waiting second press");
             return;
         }
         lastBackAt = 0L;
-        pauseMediaForHost("exit-confirm");
         exitDialog = new AlertDialog.Builder(this)
-                .setTitle("Закрыть Bambini?")
-                .setMessage("Слайд-шоу и звук будут остановлены.")
-                .setPositiveButton("Да", (dialog, which) -> {
+                .setTitle("\u0417\u0430\u043a\u0440\u044b\u0442\u044c Bambini?")
+                .setMessage("\u0421\u043b\u0430\u0439\u0434-\u0448\u043e\u0443 \u0438 \u0437\u0432\u0443\u043a \u0431\u0443\u0434\u0443\u0442 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u044b.")
+                .setPositiveButton("\u0414\u0430", (dialog, which) -> {
+                    logEvent("APP_EXIT_CONFIRMED", "yes");
+                    exiting = true;
                     if (web != null) {
                         try {
-                            web.evaluateJavascript(
-                                    "document.querySelectorAll('video,audio').forEach(function(v){try{v.pause();v.muted=true}catch(e){}})", null);
+                            web.evaluateJavascript("document.querySelectorAll('video,audio').forEach(v=>{try{v.pause();v.muted=true}catch(_){}})", null);
                         } catch (Exception ignored) {}
+                        web.stopLoading();
                     }
                     finishAndRemoveTask();
                 })
-                .setNegativeButton("Нет", (dialog, which) -> resumeMediaForHost("exit-cancel"))
-                .setOnCancelListener(dialog -> resumeMediaForHost("exit-cancel"))
+                .setNegativeButton("\u041d\u0435\u0442", (dialog, which) -> logEvent("APP_EXIT_CONFIRMED", "no"))
+                .setOnDismissListener(dialog -> exitDialog = null)
                 .create();
         exitDialog.setOnShowListener(dialog -> exitDialog.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus());
-        exitDialog.setOnDismissListener(dialog -> exitDialog = null);
         exitDialog.show();
     }
 
+    private void remoteNavigate(String direction) {
+        if (web == null || exiting) return;
+        logEvent("REMOTE_DPAD", direction);
+        web.evaluateJavascript(
+                "window.bambiniRemoteNavigate&&window.bambiniRemoteNavigate('" + direction + "')",
+                null);
+    }
+
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        int code = event.getKeyCode();
+        if (code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                remoteNavigate(code == KeyEvent.KEYCODE_DPAD_LEFT ? "left" : "right");
+            }
+            return true;
+        }
+        if (code == KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == KeyEvent.ACTION_UP) handleBackExit();
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override public void onBackPressed(){ handleBackExit(); }
     @Override public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);if(focus)immersive();}
-    @Override public void onBackPressed(){handleBackExit();}
-
-    @Override protected void onStop(){
-        pauseMediaForHost("activity-stop");
-        super.onStop();
-    }
-
-    @Override protected void onResume(){
-        super.onResume();
-        resumeMediaForHost("activity-resume");
-        immersive();
-    }
-
     @Override protected void onDestroy(){
         logEvent("APP_DESTROY", BUILD);
         control.shutdownNow();prefetch.shutdownNow();
         if(exitDialog!=null){try{exitDialog.dismiss();}catch(Exception ignored){}exitDialog=null;}
-        if(web!=null){web.loadUrl("about:blank");web.destroy();web=null;}
+        if(web!=null){
+            try{web.evaluateJavascript("document.querySelectorAll('video,audio').forEach(v=>{try{v.pause();v.muted=true}catch(_){}})",null);}catch(Exception ignored){}
+            web.loadUrl("about:blank");web.destroy();
+        }
         super.onDestroy();
     }
 }
